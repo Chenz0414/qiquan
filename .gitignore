@@ -1,0 +1,30 @@
+# 敏感配置（含天勤账号密码、PushPlus token）
+monitor_settings.json
+
+# 运行时数据
+state/
+logs/
+data_cache/
+output/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# ngrok
+ngrok.exe
+
+# Claude Code
+.claude/

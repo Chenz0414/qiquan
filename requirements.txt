@@ -1,0 +1,7 @@
+tqsdk
+pandas
+numpy
+requests
+fastapi
+uvicorn
+jinja2

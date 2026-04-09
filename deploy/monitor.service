@@ -1,0 +1,17 @@
+[Unit]
+Description=Futures Signal Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=monitor
+WorkingDirectory=/home/monitor/qiquan
+Environment=PATH=/home/monitor/venv/bin:/usr/bin
+ExecStart=/home/monitor/venv/bin/python run_monitor.py --config monitor_settings.json
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

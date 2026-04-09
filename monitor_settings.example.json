@@ -1,0 +1,10 @@
+{
+    "tq_account": "你的天勤账号",
+    "tq_password": "你的天勤密码",
+    "pushplus_token": "你的PushPlus用户token",
+    "symbols": [],
+    "state_file": "state/monitor_state.json",
+    "log_file": "logs/monitor.log",
+    "log_level": "INFO",
+    "stop_update_cooldown": 300
+}
