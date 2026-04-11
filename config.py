@@ -5,8 +5,23 @@
 """
 
 # ============ 天勤账号 ============
-TQ_ACCOUNT = "bonjour0414"
-TQ_PASSWORD = "zc950414"
+# 优先从环境变量读取，其次从本地 .secrets.json 读取
+import os as _os, json as _json
+
+def _load_secrets():
+    """从环境变量或 .secrets.json 加载凭证"""
+    account = _os.environ.get('TQ_ACCOUNT', '')
+    password = _os.environ.get('TQ_PASSWORD', '')
+    if account and password:
+        return account, password
+    _secrets_file = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.secrets.json')
+    if _os.path.exists(_secrets_file):
+        with open(_secrets_file, 'r') as f:
+            s = _json.load(f)
+        return s.get('tq_account', ''), s.get('tq_password', '')
+    return '', ''
+
+TQ_ACCOUNT, TQ_PASSWORD = _load_secrets()
 
 # ============ 品种（回测用，切换品种改这里） ============
 SYMBOL = "KQ.m@DCE.lh"   # 生猪主力连续

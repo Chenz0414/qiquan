@@ -4,6 +4,7 @@
 """
 import logging
 from tqsdk import TqApi, TqAuth
+import config as cfg
 from signal_core import (
     SignalDetector, SYMBOL_CONFIGS, DEFAULT_STOP_TICKS,
     classify_scenario, SCENARIO_EXIT,
@@ -12,7 +13,7 @@ from data_loader import add_indicators, sym_name
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-api = TqApi(auth=TqAuth("bonjour0414", "zc950414"))
+api = TqApi(auth=TqAuth(cfg.TQ_ACCOUNT, cfg.TQ_PASSWORD))
 
 total = 0
 for sym_key, cfg in SYMBOL_CONFIGS.items():

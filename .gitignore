@@ -1,5 +1,7 @@
 # 敏感配置（含天勤账号密码、PushPlus token）
 monitor_settings.json
+.secrets.json
+probe_results.json
 
 # 运行时数据
 state/
