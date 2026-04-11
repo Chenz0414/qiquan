@@ -12,7 +12,7 @@
 |------|------|------|
 | 本地 | `C:\Users\Administrator\Desktop\qiquan` | 回测研究 + 开发 |
 | GitHub | `Chenz0414/qiquan.git` (origin/main) | 代码同步中转 |
-| 腾讯云 | `/home/monitor/qiquan` | systemd 运行监控服务 |
+| 腾讯云 | `/home/ubuntu/qiquan` | systemd 运行监控服务 |
 
 同步流程：本地开发 → `git push` → 云服务器 `git pull` + `systemctl restart monitor`
 

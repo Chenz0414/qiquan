@@ -11,10 +11,10 @@ git commit -m "描述改动"
 git push
 
 # 2. SSH 到云服务器
-ssh monitor@<服务器IP>
+ssh -i qiquan.pem ubuntu@124.222.55.3
 
 # 3. 拉取并重启
-cd /home/monitor/qiquan
+cd /home/ubuntu/qiquan
 git pull
 sudo systemctl restart monitor
 
@@ -26,7 +26,7 @@ journalctl -u monitor -f --no-pager -n 30
 ### 如果有新依赖
 
 ```bash
-source /home/monitor/venv/bin/activate
+source /home/ubuntu/qiquan/venv/bin/activate
 pip install -r requirements.txt
 sudo systemctl restart monitor
 ```
@@ -37,8 +37,8 @@ sudo systemctl restart monitor
 
 | 文件 | 位置 | 说明 |
 |------|------|------|
-| `monitor_settings.json` | `/home/monitor/qiquan/` | 天勤账号 + PushPlus token |
-| `.secrets.json` | `/home/monitor/qiquan/` | 天勤账号（config.py 读取） |
+| `monitor_settings.json` | `/home/ubuntu/qiquan/` | 天勤账号 + PushPlus token |
+| `.secrets.json` | `/home/ubuntu/qiquan/` | 天勤账号（config.py 读取） |
 
 首次部署时需手动创建这两个文件：
 
@@ -78,8 +78,8 @@ EOF
   ```bash
   sudo systemctl stop monitor
   # 编辑 ExecStart 临时加 --reset-state，或手动运行：
-  cd /home/monitor/qiquan
-  /home/monitor/venv/bin/python run_monitor.py --reset-state --config monitor_settings.json
+  cd /home/ubuntu/qiquan
+  /home/ubuntu/qiquan/venv/bin/python run_monitor.py --reset-state --config monitor_settings.json
   ```
 
 ## 故障排查
@@ -95,8 +95,8 @@ journalctl -u monitor -f
 journalctl -u monitor --since "1 hour ago" --no-pager | grep -i error
 
 # 手动运行（debug模式）
-cd /home/monitor/qiquan
-source /home/monitor/venv/bin/activate
+cd /home/ubuntu/qiquan
+source /home/ubuntu/qiquan/venv/bin/activate
 python run_monitor.py --config monitor_settings.json --dry-run
 
 # 检查天勤连接
