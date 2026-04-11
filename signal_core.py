@@ -312,15 +312,20 @@ class ExitTracker:
     追踪单个持仓的出场方式：
       S1.1: 当根新高追踪止损，收盘价触发（close创新高时，止损更新为当根low - N跳）
       S2: 回调追踪止损，盘中触发（回调完成站回EMA10时，止损更新为回调最低点 - N跳）
+      S2.1: 同S2，止损触发改为收盘价穿止损
       S3.1: 前根新高追踪止损，收盘价触发（close创新高时，止损更新为前根low - N跳）
       S5.1: S3.1兜底(收盘触损)+S2接管(盘中触损)
+      S5.2: S3.1兜底(收盘触损)+S2.1接管(收盘触损)
+      S6: 同S2，回调检测用EMA5代替EMA10（更紧跟踪），盘中触发
+      S6.1: 同S6，止损触发改为收盘价穿止损
 
     初始止损统一为：回调极值 - N跳（N = stop_ticks）
     """
 
     def __init__(self, direction: str, entry_price: float,
                  pullback_extreme: float, tick_size: float,
-                 stop_ticks: int = DEFAULT_STOP_TICKS):
+                 stop_ticks: int = DEFAULT_STOP_TICKS,
+                 ema5_strategies: bool = False):
         self.direction = direction
         self.entry_price = entry_price
         self.is_long = (direction == 'long')
@@ -346,6 +351,13 @@ class ExitTracker:
         self.s2_state = 'normal'  # 'normal' or 'pullback'
         self.s2_tracking_extreme = None
 
+        # S2.1 同S2，收盘价触发
+        self.s21_stop = init_stop
+        self.s21_done = False
+        self.s21_bars = 0
+        self.s21_state = 'normal'
+        self.s21_tracking_extreme = None
+
         # S3.1 前根新高追踪止损，收盘价触发
         self.s31_stop = init_stop
         self.s31_done = False
@@ -359,16 +371,45 @@ class ExitTracker:
         self.s51_s2_state = 'normal'
         self.s51_s2_tracking_extreme = None
 
+        # S5.2 S3.1兜底(收盘触损)+S2.1接管(收盘触损)
+        self.s52_stop = init_stop
+        self.s52_done = False
+        self.s52_bars = 0
+        self.s52_mode = 's3.1'  # 's3.1' or 's2.1'
+        self.s52_s21_state = 'normal'
+        self.s52_s21_tracking_extreme = None
+
+        # S6 EMA5回调追踪止损，盘中触发
+        self.s6_stop = init_stop
+        self.s6_done = not ema5_strategies  # 未启用时直接标完成
+        self.s6_bars = 0
+        self.s6_state = 'normal'
+        self.s6_tracking_extreme = None
+
+        # S6.1 EMA5回调追踪止损，收盘价触发
+        self.s61_stop = init_stop
+        self.s61_done = not ema5_strategies
+        self.s61_bars = 0
+        self.s61_state = 'normal'
+        self.s61_tracking_extreme = None
+
         # 上一次的止损值（用于检测止损移动）
         self._prev_s2_stop = self.s2_stop
+        self._prev_s21_stop = self.s21_stop
         self._prev_s51_stop = self.s51_stop
+        self._prev_s52_stop = self.s52_stop
+        self._prev_s6_stop = self.s6_stop
+        self._prev_s61_stop = self.s61_stop
 
     def all_done(self) -> bool:
-        return self.s11_done and self.s2_done and self.s31_done and self.s51_done
+        return (self.s11_done and self.s2_done and self.s21_done
+                and self.s31_done and self.s51_done and self.s52_done
+                and self.s6_done and self.s61_done)
 
     def process_bar(self, close: float, high: float, low: float,
                     ema10: float, prev_close: float,
-                    prev_high: float = None, prev_low: float = None
+                    prev_high: float = None, prev_low: float = None,
+                    ema5: float = None,
                     ) -> tuple[List[ExitEvent], List[StopUpdate]]:
         """
         处理一根已收盘K线。
@@ -386,7 +427,11 @@ class ExitTracker:
         stop_updates: List[StopUpdate] = []
 
         self._prev_s2_stop = self.s2_stop
+        self._prev_s21_stop = self.s21_stop
         self._prev_s51_stop = self.s51_stop
+        self._prev_s52_stop = self.s52_stop
+        self._prev_s6_stop = self.s6_stop
+        self._prev_s61_stop = self.s61_stop
 
         # ===== S1.1 当根新高追踪止损，收盘价触发 =====
         if not self.s11_done:
@@ -565,14 +610,232 @@ class ExitTracker:
                             candidate = prev_high + self.tick
                             self.s51_stop = min(self.s51_stop, candidate)
 
+        # ===== S2.1 同S2回调追踪，收盘价触发 =====
+        if not self.s21_done:
+            self.s21_bars += 1
+
+            if self.is_long and close <= self.s21_stop:
+                self.s21_done = True
+                pnl = (close - self.entry_price) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S2.1', exit_price=close,
+                    exit_reason='stop', bars_held=self.s21_bars, pnl_pct=pnl,
+                ))
+            elif not self.is_long and close >= self.s21_stop:
+                self.s21_done = True
+                pnl = (self.entry_price - close) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S2.1', exit_price=close,
+                    exit_reason='stop', bars_held=self.s21_bars, pnl_pct=pnl,
+                ))
+            else:
+                # 状态机与S2完全一致，用ema10
+                if self.is_long:
+                    if self.s21_state == 'normal':
+                        if close < ema10:
+                            self.s21_state = 'pullback'
+                            self.s21_tracking_extreme = low
+                    elif self.s21_state == 'pullback':
+                        self.s21_tracking_extreme = min(self.s21_tracking_extreme, low)
+                        if close > ema10:
+                            candidate = self.s21_tracking_extreme - self.tick
+                            self.s21_stop = max(self.s21_stop, candidate)
+                            self.s21_state = 'normal'
+                            self.s21_tracking_extreme = None
+                else:  # short
+                    if self.s21_state == 'normal':
+                        if close > ema10:
+                            self.s21_state = 'pullback'
+                            self.s21_tracking_extreme = high
+                    elif self.s21_state == 'pullback':
+                        self.s21_tracking_extreme = max(self.s21_tracking_extreme, high)
+                        if close < ema10:
+                            candidate = self.s21_tracking_extreme + self.tick
+                            self.s21_stop = min(self.s21_stop, candidate)
+                            self.s21_state = 'normal'
+                            self.s21_tracking_extreme = None
+
+        # ===== S5.2 S3.1兜底(收盘触损) + S2.1接管(收盘触损) =====
+        if not self.s52_done:
+            self.s52_bars += 1
+
+            # 两种模式都用收盘价触发
+            hit_stop = False
+            if self.is_long and close <= self.s52_stop:
+                hit_stop = True
+            elif not self.is_long and close >= self.s52_stop:
+                hit_stop = True
+
+            if hit_stop:
+                self.s52_done = True
+                exit_price = close
+                if self.is_long:
+                    pnl = (exit_price - self.entry_price) / self.entry_price * 100
+                else:
+                    pnl = (self.entry_price - exit_price) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S5.2', exit_price=exit_price,
+                    exit_reason='stop', bars_held=self.s52_bars, pnl_pct=pnl,
+                ))
+            else:
+                # S2.1回调追踪（始终在跑，用ema10）
+                s21_updated = False
+                if self.is_long:
+                    if self.s52_s21_state == 'normal':
+                        if close < ema10:
+                            self.s52_s21_state = 'pullback'
+                            self.s52_s21_tracking_extreme = low
+                    elif self.s52_s21_state == 'pullback':
+                        self.s52_s21_tracking_extreme = min(self.s52_s21_tracking_extreme, low)
+                        if close > ema10:
+                            candidate = self.s52_s21_tracking_extreme - self.tick
+                            if candidate > self.s52_stop:
+                                self.s52_stop = candidate
+                                s21_updated = True
+                            self.s52_s21_state = 'normal'
+                            self.s52_s21_tracking_extreme = None
+                else:
+                    if self.s52_s21_state == 'normal':
+                        if close > ema10:
+                            self.s52_s21_state = 'pullback'
+                            self.s52_s21_tracking_extreme = high
+                    elif self.s52_s21_state == 'pullback':
+                        self.s52_s21_tracking_extreme = max(self.s52_s21_tracking_extreme, high)
+                        if close < ema10:
+                            candidate = self.s52_s21_tracking_extreme + self.tick
+                            if candidate < self.s52_stop:
+                                self.s52_stop = candidate
+                                s21_updated = True
+                            self.s52_s21_state = 'normal'
+                            self.s52_s21_tracking_extreme = None
+
+                if s21_updated:
+                    self.s52_mode = 's2.1'
+
+                # S3.1追踪（仅在s3.1模式下更新止损）
+                if self.s52_mode == 's3.1':
+                    if prev_low is not None:
+                        if self.is_long and close > prev_close:
+                            candidate = prev_low - self.tick
+                            self.s52_stop = max(self.s52_stop, candidate)
+                        elif not self.is_long and close < prev_close:
+                            candidate = prev_high + self.tick
+                            self.s52_stop = min(self.s52_stop, candidate)
+
+        # ===== S6 EMA5回调追踪止损，盘中触发 =====
+        if not self.s6_done and ema5 is not None:
+            self.s6_bars += 1
+
+            if self.is_long and low <= self.s6_stop:
+                self.s6_done = True
+                pnl = (self.s6_stop - self.entry_price) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S6', exit_price=self.s6_stop,
+                    exit_reason='stop', bars_held=self.s6_bars, pnl_pct=pnl,
+                ))
+            elif not self.is_long and high >= self.s6_stop:
+                self.s6_done = True
+                pnl = (self.entry_price - self.s6_stop) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S6', exit_price=self.s6_stop,
+                    exit_reason='stop', bars_held=self.s6_bars, pnl_pct=pnl,
+                ))
+            else:
+                # 状态机用ema5
+                if self.is_long:
+                    if self.s6_state == 'normal':
+                        if close < ema5:
+                            self.s6_state = 'pullback'
+                            self.s6_tracking_extreme = low
+                    elif self.s6_state == 'pullback':
+                        self.s6_tracking_extreme = min(self.s6_tracking_extreme, low)
+                        if close > ema5:
+                            candidate = self.s6_tracking_extreme - self.tick
+                            self.s6_stop = max(self.s6_stop, candidate)
+                            self.s6_state = 'normal'
+                            self.s6_tracking_extreme = None
+                else:  # short
+                    if self.s6_state == 'normal':
+                        if close > ema5:
+                            self.s6_state = 'pullback'
+                            self.s6_tracking_extreme = high
+                    elif self.s6_state == 'pullback':
+                        self.s6_tracking_extreme = max(self.s6_tracking_extreme, high)
+                        if close < ema5:
+                            candidate = self.s6_tracking_extreme + self.tick
+                            self.s6_stop = min(self.s6_stop, candidate)
+                            self.s6_state = 'normal'
+                            self.s6_tracking_extreme = None
+
+        # ===== S6.1 EMA5回调追踪止损，收盘价触发 =====
+        if not self.s61_done and ema5 is not None:
+            self.s61_bars += 1
+
+            if self.is_long and close <= self.s61_stop:
+                self.s61_done = True
+                pnl = (close - self.entry_price) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S6.1', exit_price=close,
+                    exit_reason='stop', bars_held=self.s61_bars, pnl_pct=pnl,
+                ))
+            elif not self.is_long and close >= self.s61_stop:
+                self.s61_done = True
+                pnl = (self.entry_price - close) / self.entry_price * 100
+                exits.append(ExitEvent(
+                    strategy='S6.1', exit_price=close,
+                    exit_reason='stop', bars_held=self.s61_bars, pnl_pct=pnl,
+                ))
+            else:
+                # 状态机用ema5
+                if self.is_long:
+                    if self.s61_state == 'normal':
+                        if close < ema5:
+                            self.s61_state = 'pullback'
+                            self.s61_tracking_extreme = low
+                    elif self.s61_state == 'pullback':
+                        self.s61_tracking_extreme = min(self.s61_tracking_extreme, low)
+                        if close > ema5:
+                            candidate = self.s61_tracking_extreme - self.tick
+                            self.s61_stop = max(self.s61_stop, candidate)
+                            self.s61_state = 'normal'
+                            self.s61_tracking_extreme = None
+                else:  # short
+                    if self.s61_state == 'normal':
+                        if close > ema5:
+                            self.s61_state = 'pullback'
+                            self.s61_tracking_extreme = high
+                    elif self.s61_state == 'pullback':
+                        self.s61_tracking_extreme = max(self.s61_tracking_extreme, high)
+                        if close < ema5:
+                            candidate = self.s61_tracking_extreme + self.tick
+                            self.s61_stop = min(self.s61_stop, candidate)
+                            self.s61_state = 'normal'
+                            self.s61_tracking_extreme = None
+
         # 检测止损移动
         if not self.s2_done and self.s2_stop != self._prev_s2_stop:
             stop_updates.append(StopUpdate(
                 strategy='S2', old_stop=self._prev_s2_stop, new_stop=self.s2_stop,
             ))
+        if not self.s21_done and self.s21_stop != self._prev_s21_stop:
+            stop_updates.append(StopUpdate(
+                strategy='S2.1', old_stop=self._prev_s21_stop, new_stop=self.s21_stop,
+            ))
         if not self.s51_done and self.s51_stop != self._prev_s51_stop:
             stop_updates.append(StopUpdate(
                 strategy='S5.1', old_stop=self._prev_s51_stop, new_stop=self.s51_stop,
+            ))
+        if not self.s52_done and self.s52_stop != self._prev_s52_stop:
+            stop_updates.append(StopUpdate(
+                strategy='S5.2', old_stop=self._prev_s52_stop, new_stop=self.s52_stop,
+            ))
+        if not self.s6_done and self.s6_stop != self._prev_s6_stop:
+            stop_updates.append(StopUpdate(
+                strategy='S6', old_stop=self._prev_s6_stop, new_stop=self.s6_stop,
+            ))
+        if not self.s61_done and self.s61_stop != self._prev_s61_stop:
+            stop_updates.append(StopUpdate(
+                strategy='S6.1', old_stop=self._prev_s61_stop, new_stop=self.s61_stop,
             ))
 
         return exits, stop_updates
@@ -583,8 +846,12 @@ class ExitTracker:
         for strategy, done, bars in [
             ('S1.1', self.s11_done, self.s11_bars),
             ('S2', self.s2_done, self.s2_bars),
+            ('S2.1', self.s21_done, self.s21_bars),
             ('S3.1', self.s31_done, self.s31_bars),
             ('S5.1', self.s51_done, self.s51_bars),
+            ('S5.2', self.s52_done, self.s52_bars),
+            ('S6', self.s6_done, self.s6_bars),
+            ('S6.1', self.s61_done, self.s61_bars),
         ]:
             if not done:
                 if self.is_long:
@@ -597,8 +864,12 @@ class ExitTracker:
                 ))
         self.s11_done = True
         self.s2_done = True
+        self.s21_done = True
         self.s31_done = True
         self.s51_done = True
+        self.s52_done = True
+        self.s6_done = True
+        self.s61_done = True
         return exits
 
     def to_dict(self) -> dict:
@@ -613,11 +884,21 @@ class ExitTracker:
             's11_stop': self.s11_stop, 's11_done': self.s11_done, 's11_bars': self.s11_bars,
             's2_stop': self.s2_stop, 's2_done': self.s2_done, 's2_bars': self.s2_bars,
             's2_state': self.s2_state, 's2_tracking_extreme': self.s2_tracking_extreme,
+            's21_stop': self.s21_stop, 's21_done': self.s21_done, 's21_bars': self.s21_bars,
+            's21_state': self.s21_state, 's21_tracking_extreme': self.s21_tracking_extreme,
             's31_stop': self.s31_stop, 's31_done': self.s31_done, 's31_bars': self.s31_bars,
             's51_stop': self.s51_stop, 's51_done': self.s51_done, 's51_bars': self.s51_bars,
             's51_mode': self.s51_mode,
             's51_s2_state': self.s51_s2_state, 's51_s2_tracking_extreme': self.s51_s2_tracking_extreme,
+            's52_stop': self.s52_stop, 's52_done': self.s52_done, 's52_bars': self.s52_bars,
+            's52_mode': self.s52_mode,
+            's52_s21_state': self.s52_s21_state, 's52_s21_tracking_extreme': self.s52_s21_tracking_extreme,
+            's6_stop': self.s6_stop, 's6_done': self.s6_done, 's6_bars': self.s6_bars,
+            's6_state': self.s6_state, 's6_tracking_extreme': self.s6_tracking_extreme,
+            's61_stop': self.s61_stop, 's61_done': self.s61_done, 's61_bars': self.s61_bars,
+            's61_state': self.s61_state, 's61_tracking_extreme': self.s61_tracking_extreme,
             '_prev_s51_stop': self._prev_s51_stop,
+            '_prev_s52_stop': self._prev_s52_stop,
         }
 
     @classmethod
@@ -638,6 +919,11 @@ class ExitTracker:
         tracker.s2_bars = d['s2_bars']
         tracker.s2_state = d['s2_state']
         tracker.s2_tracking_extreme = d['s2_tracking_extreme']
+        tracker.s21_stop = d.get('s21_stop', d['s2_stop'])
+        tracker.s21_done = d.get('s21_done', True)
+        tracker.s21_bars = d.get('s21_bars', 0)
+        tracker.s21_state = d.get('s21_state', 'normal')
+        tracker.s21_tracking_extreme = d.get('s21_tracking_extreme')
         tracker.s31_stop = d['s31_stop']
         tracker.s31_done = d['s31_done']
         tracker.s31_bars = d['s31_bars']
@@ -647,8 +933,28 @@ class ExitTracker:
         tracker.s51_mode = d['s51_mode']
         tracker.s51_s2_state = d['s51_s2_state']
         tracker.s51_s2_tracking_extreme = d['s51_s2_tracking_extreme']
+        tracker.s52_stop = d.get('s52_stop', d['s51_stop'])
+        tracker.s52_done = d.get('s52_done', True)
+        tracker.s52_bars = d.get('s52_bars', 0)
+        tracker.s52_mode = d.get('s52_mode', 's3.1')
+        tracker.s52_s21_state = d.get('s52_s21_state', 'normal')
+        tracker.s52_s21_tracking_extreme = d.get('s52_s21_tracking_extreme')
+        tracker.s6_stop = d.get('s6_stop', d['s2_stop'])
+        tracker.s6_done = d.get('s6_done', True)
+        tracker.s6_bars = d.get('s6_bars', 0)
+        tracker.s6_state = d.get('s6_state', 'normal')
+        tracker.s6_tracking_extreme = d.get('s6_tracking_extreme')
+        tracker.s61_stop = d.get('s61_stop', d['s2_stop'])
+        tracker.s61_done = d.get('s61_done', True)
+        tracker.s61_bars = d.get('s61_bars', 0)
+        tracker.s61_state = d.get('s61_state', 'normal')
+        tracker.s61_tracking_extreme = d.get('s61_tracking_extreme')
         tracker._prev_s2_stop = d['s2_stop']
+        tracker._prev_s21_stop = d.get('s21_stop', d['s2_stop'])
         tracker._prev_s51_stop = d.get('_prev_s51_stop', d['s51_stop'])
+        tracker._prev_s52_stop = d.get('_prev_s52_stop', d.get('s52_stop', d['s51_stop']))
+        tracker._prev_s6_stop = d.get('s6_stop', d['s2_stop'])
+        tracker._prev_s61_stop = d.get('s61_stop', d['s2_stop'])
         return tracker
 
 
@@ -677,12 +983,12 @@ def classify_scenario(sig_type: str, er20: float, deviation_atr: float):
     return None
 
 
-# 场景对应的出场策略和名称
-SCENARIO_EXIT = {1: 'S2', 2: 'S2', 3: 'S5.1'}
-SCENARIO_PNL_COL = {1: 's2_pnl', 2: 's2_pnl', 3: 's51_pnl'}
-SCENARIO_REASON_COL = {1: 's2_reason', 2: 's2_reason', 3: 's51_reason'}
+# 场景对应的出场策略和名称（2026-04-11更新：场景1/2从S2升级为S6）
+SCENARIO_EXIT = {1: 'S6', 2: 'S6', 3: 'S5.1'}
+SCENARIO_PNL_COL = {1: 's6_pnl', 2: 's6_pnl', 3: 's51_pnl'}
+SCENARIO_REASON_COL = {1: 's6_reason', 2: 's6_reason', 3: 's51_reason'}
 SCENARIO_NAMES = {
-    1: '场景1: A类+ER≥0.5+偏离≥1.0ATR → S2',
-    2: '场景2: C类+偏离≥2.0ATR → S2',
+    1: '场景1: A类+ER≥0.5+偏离≥1.0ATR → S6',
+    2: '场景2: C类+偏离≥2.0ATR → S6',
     3: '场景3: B类+ER≥0.5+偏离0.1~0.3ATR → S5.1',
 }
