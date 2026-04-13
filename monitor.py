@@ -265,7 +265,7 @@ class MonitorEngine:
             return None
 
         # 计算指标（复用 data_loader）
-        df = add_indicators(df, emas=(10, 20, 120),
+        df = add_indicators(df, emas=(5, 10, 20, 120),
                             er_periods=(5, 20, 40), atr_period=14)
 
         # 仓位计算需要的变化量
@@ -321,6 +321,7 @@ class MonitorEngine:
         close = row['close']
         high = row['high']
         low = row['low']
+        ema5 = row.get('ema5')
         ema10 = row['ema10']
         ema20 = row['ema20']
         ema120 = row['ema120']
@@ -342,6 +343,7 @@ class MonitorEngine:
             exit_events, stop_updates = tracker.process_bar(
                 close=close, high=high, low=low, ema10=ema10,
                 prev_close=prev_close, prev_high=prev_high, prev_low=prev_low,
+                ema5=ema5,
             )
 
             # 止损挪动通知
@@ -459,6 +461,7 @@ class MonitorEngine:
             pullback_extreme=signal.pullback_extreme,
             tick_size=cfg_sym['tick_size'],
             stop_ticks=DEFAULT_STOP_TICKS,
+            ema5_strategies=(exit_strategy in ('S6', 'S6.1')),
         )
         self.trackers[sym_key] = tracker
         self.tracker_meta[sym_key] = {
