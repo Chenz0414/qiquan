@@ -22,16 +22,21 @@ class StateManager:
         self._backup_file = state_file + '.bak'
 
     def save(self, detectors: dict, trackers: dict,
-             tracker_meta: dict, bar_counts: dict):
+             tracker_meta: dict, bar_counts: dict,
+             t1_detectors: dict = None, t1_trackers: dict = None,
+             t1_tracker_meta: dict = None):
         """
         保存全部状态到 JSON。
         原子写入：先写 .tmp 再 rename。
 
         参数:
-          detectors: {sym_key: detector.to_dict()}
-          trackers: {sym_key: tracker.to_dict()}
+          detectors: {sym_key: SignalDetector}
+          trackers: {sym_key: ExitTracker}
           tracker_meta: {sym_key: {scenario, entry_time, ...}}
           bar_counts: {sym_key: int}
+          t1_detectors: {sym_key: Type1SignalDetector}
+          t1_trackers: {sym_key: LadderRTracker}
+          t1_tracker_meta: {sym_key: {...}}
         """
         state = {
             "version": self.VERSION,
@@ -45,6 +50,17 @@ class StateManager:
                 "tracker": tracker.to_dict(),
                 "meta": tracker_meta.get(sym_key, {}),
             }
+
+        # Type1 状态
+        if t1_detectors:
+            state["t1_detectors"] = {k: v.to_dict() for k, v in t1_detectors.items()}
+        if t1_trackers:
+            state["t1_positions"] = {}
+            for sym_key, tracker in t1_trackers.items():
+                state["t1_positions"][sym_key] = {
+                    "tracker": tracker.to_dict(),
+                    "meta": (t1_tracker_meta or {}).get(sym_key, {}),
+                }
 
         # 确保目录存在
         os.makedirs(os.path.dirname(self.state_file) or '.', exist_ok=True)

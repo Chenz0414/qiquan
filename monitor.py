@@ -17,6 +17,8 @@ from signal_core import (
     SignalDetector, ExitTracker, Signal,
     SYMBOL_CONFIGS, DEFAULT_STOP_TICKS,
     classify_scenario, SCENARIO_EXIT, SCENARIO_NAMES,
+    Type1SignalDetector, Type1Signal, LadderRTracker,
+    classify_type1_tier, TYPE1_TIER_NAMES,
 )
 from data_loader import add_indicators, sym_name
 from monitor_config import MonitorConfig
@@ -45,10 +47,16 @@ class MonitorEngine:
         )
         self.state_mgr = StateManager(config.state_file)
 
-        # 每品种状态
+        # 每品种状态 — ABC系统
         self.detectors: dict[str, SignalDetector] = {}
         self.trackers: dict[str, ExitTracker] = {}
         self.tracker_meta: dict[str, dict] = {}
+
+        # 每品种状态 — Type1系统（与ABC并行）
+        self.t1_detectors: dict[str, Type1SignalDetector] = {}
+        self.t1_trackers: dict[str, LadderRTracker] = {}
+        self.t1_tracker_meta: dict[str, dict] = {}
+
         self.kline_serials: dict[str, object] = {}
         self.bar_counts: dict[str, int] = {}
         # 每品种最后处理的K线时间戳（用于检测新K线）
@@ -142,18 +150,30 @@ class MonitorEngine:
             # 冷启动：为每个品种创建新检测器
             for sym_key in self.config.symbols:
                 self.detectors[sym_key] = SignalDetector(signal_types='ABC')
+                self.t1_detectors[sym_key] = Type1SignalDetector()
             return
 
-        # 恢复检测器
+        # 恢复ABC检测器
         for sym_key, det_dict in state.get("detectors", {}).items():
             if sym_key in self.config.symbols:
                 self.detectors[sym_key] = SignalDetector.from_dict(det_dict)
 
-        # 恢复活跃持仓
+        # 恢复ABC活跃持仓
         for sym_key, pos in state.get("active_positions", {}).items():
             if sym_key in self.config.symbols:
                 self.trackers[sym_key] = ExitTracker.from_dict(pos["tracker"])
                 self.tracker_meta[sym_key] = pos["meta"]
+
+        # 恢复Type1检测器
+        for sym_key, det_dict in state.get("t1_detectors", {}).items():
+            if sym_key in self.config.symbols:
+                self.t1_detectors[sym_key] = Type1SignalDetector.from_dict(det_dict)
+
+        # 恢复Type1活跃持仓
+        for sym_key, pos in state.get("t1_positions", {}).items():
+            if sym_key in self.config.symbols:
+                self.t1_trackers[sym_key] = LadderRTracker.from_dict(pos["tracker"])
+                self.t1_tracker_meta[sym_key] = pos["meta"]
 
         # 恢复进度
         self.bar_counts = state.get("bar_counts", {})
@@ -162,9 +182,12 @@ class MonitorEngine:
         for sym_key in self.config.symbols:
             if sym_key not in self.detectors:
                 self.detectors[sym_key] = SignalDetector(signal_types='ABC')
+            if sym_key not in self.t1_detectors:
+                self.t1_detectors[sym_key] = Type1SignalDetector()
 
+        t1_active = len(self.t1_trackers)
         logger.info(f"状态恢复: {len(self.detectors)}个检测器, "
-                    f"{len(self.trackers)}个活跃持仓")
+                    f"{len(self.trackers)}个ABC持仓, {t1_active}个Type1持仓")
 
     def _warmup_all(self):
         """
@@ -186,15 +209,32 @@ class MonitorEngine:
                 continue  # 已经是最新的
 
             if prev_count == 0:
-                # 冷启动：喂入全部历史
+                # 冷启动：喂入全部历史（ABC + Type1）
                 logger.info(f"{sym_key}: 冷启动预热 {n} 根K线...")
                 detector = self.detectors[sym_key]
+                t1_det = self.t1_detectors.get(sym_key)
+                cfg_sym = SYMBOL_CONFIGS[sym_key]
+                ts = cfg_sym['tick_size']
                 for i in range(n):
                     row = df.iloc[i]
                     detector.process_bar(
                         row['close'], row['high'], row['low'],
                         row['ema10'], row['ema20'], row['ema120'],
                     )
+                    # Type1 detector 也需要预热（建立 prev_close/ema10/方向/热手状态）
+                    if t1_det:
+                        t1_det.process_bar(
+                            close=row['close'], high=row['high'],
+                            low=row['low'], opn=float(row.get('open', 0) or 0),
+                            ema10=row['ema10'],
+                            ema60=float(row.get('ema60', 0) or 0),
+                            er20=float(row.get('er_20', 0) or 0),
+                            er40=float(row.get('er_40', 0) or 0),
+                            atr=float(row.get('atr', 0) or 0),
+                            tick_size=ts,
+                        )
+                        # 预热期间不处理挂单（只建立状态）
+                        t1_det.pending = None
                 self.bar_counts[sym_key] = n
             else:
                 # 热恢复：只处理新增K线（断线期间的）
@@ -265,7 +305,7 @@ class MonitorEngine:
             return None
 
         # 计算指标（复用 data_loader）
-        df = add_indicators(df, emas=(5, 10, 20, 120),
+        df = add_indicators(df, emas=(5, 10, 20, 60, 120),
                             er_periods=(5, 20, 40), atr_period=14)
 
         # 仓位计算需要的变化量
@@ -409,6 +449,47 @@ class MonitorEngine:
         if signal is not None and sym_key not in self.trackers:
             self._on_new_signal(sym_key, signal, row)
 
+        # ============ Type1 系统 ============
+        t1_det = self.t1_detectors.get(sym_key)
+        if t1_det is None:
+            return
+
+        cfg_sym = SYMBOL_CONFIGS[sym_key]
+        ts = cfg_sym['tick_size']
+        er40_val = float(row.get('er_40', 0) or 0)
+
+        # 4. Type1 挂单成交检查
+        if t1_det.pending is not None and sym_key not in self.t1_trackers:
+            fill_result = t1_det.check_fill(
+                high=high, low=low, opn=float(row.get('open', 0) or 0))
+            if fill_result:
+                if fill_result['status'] == 'filled':
+                    self._on_type1_fill(sym_key, fill_result['signal'], row)
+                elif fill_result['status'] in ('expired', 'gap_skip'):
+                    logger.debug(f"{sym_key} Type1挂单{fill_result['status']}")
+
+        # 5. Type1 出场追踪
+        if sym_key in self.t1_trackers:
+            ev = self.t1_trackers[sym_key].process_bar(close, high, low)
+            if ev:
+                self._on_type1_exit(sym_key, ev)
+
+        # 6. Type1 信号检测（始终喂数据保持状态，有持仓时忽略信号）
+        t1_signal = t1_det.process_bar(
+            close=close, high=high, low=low,
+            opn=float(row.get('open', 0) or 0),
+            ema10=ema10, ema60=float(row.get('ema60', 0) or 0),
+            er20=float(row.get('er_20', 0) or 0),
+            er40=er40_val,
+            atr=float(row.get('atr', 0) or 0),
+            tick_size=ts,
+        )
+        if t1_signal and sym_key not in self.t1_trackers:
+            self._on_type1_signal(sym_key, t1_signal, row)
+        elif sym_key in self.t1_trackers:
+            # 有持仓时清除pending，不开新单
+            t1_det.pending = None
+
     # ================================================================
     #  信号处理
     # ================================================================
@@ -543,6 +624,130 @@ class MonitorEngine:
                     f"{position_multiplier}x {exit_strategy}")
 
     # ================================================================
+    #  Type1 信号处理
+    # ================================================================
+
+    def _on_type1_signal(self, sym_key: str, signal: Type1Signal, row):
+        """Type1 新信号：分级 → 推送（挂单等成交）"""
+        tier, preset = classify_type1_tier(
+            signal.stop_dist_atr, signal.recent_win_n,
+            signal.er_40, signal.signal_density)
+
+        if preset is None:
+            # γ，不做
+            logger.debug(f"{sym_key} Type1信号γ跳过: "
+                        f"stop_atr={signal.stop_dist_atr} hot={signal.recent_win_n} "
+                        f"er40={signal.er_40} density={signal.signal_density}")
+            # 清除pending防止成交
+            self.t1_detectors[sym_key].pending = None
+            return
+
+        # 推送挂单信号
+        tier_name = TYPE1_TIER_NAMES.get(tier, tier)
+        self.notifier.notify_type1_signal(
+            sym_key=sym_key,
+            direction=signal.direction,
+            pending_price=signal.pending_price,
+            stop_price=signal.stop_price,
+            tier=tier_name,
+            preset=preset,
+            stop_dist_atr=signal.stop_dist_atr,
+            er_40=signal.er_40,
+            recent_win_n=signal.recent_win_n,
+        )
+
+        logger.info(f"Type1信号: {sym_key} {signal.direction} {tier_name} "
+                    f"挂单{signal.pending_price} 止损{signal.stop_price}")
+
+    def _on_type1_fill(self, sym_key: str, signal: Type1Signal, row):
+        """Type1 挂单成交：创建 LadderRTracker"""
+        tier, preset = classify_type1_tier(
+            signal.stop_dist_atr, signal.recent_win_n,
+            signal.er_40, signal.signal_density)
+
+        if preset is None:
+            return
+
+        cfg_sym = SYMBOL_CONFIGS[sym_key]
+        tracker = LadderRTracker(
+            direction=signal.direction,
+            entry_price=signal.pending_price,
+            stop_price=signal.stop_price,
+            tick_size=cfg_sym['tick_size'],
+            preset=preset,
+        )
+
+        self.t1_trackers[sym_key] = tracker
+        self.t1_tracker_meta[sym_key] = {
+            'tier': tier,
+            'preset': preset,
+            'entry_time': datetime.now().isoformat(),
+            'entry_price': signal.pending_price,
+            'stop_price': signal.stop_price,
+            'direction': signal.direction,
+        }
+
+        tier_name = TYPE1_TIER_NAMES.get(tier, tier)
+        self.notifier.notify_type1_fill(
+            sym_key=sym_key,
+            direction=signal.direction,
+            entry_price=signal.pending_price,
+            stop_price=signal.stop_price,
+            tier=tier_name,
+            preset=preset,
+        )
+
+        if self.dashboard_state:
+            self.dashboard_state.update_position(f't1_{sym_key}', {
+                'sym_name': f'[T1] {sym_name(sym_key)}',
+                'direction': signal.direction,
+                'entry_price': signal.pending_price,
+                'current_stop': signal.stop_price,
+                'exit_strategy': f'LR_{preset}',
+                'mode': tier_name,
+                'scenario': f'T1-{tier}',
+                'position_multiplier': 1,
+                'bars_held': 0,
+            })
+
+        self._save_state()
+        logger.info(f"Type1成交: {sym_key} {signal.direction} {tier_name} "
+                    f"入{signal.pending_price} LR_{preset}")
+
+    def _on_type1_exit(self, sym_key: str, ev):
+        """Type1 出场"""
+        meta = self.t1_tracker_meta.get(sym_key, {})
+        tier = meta.get('tier', '?')
+        tier_name = TYPE1_TIER_NAMES.get(tier, tier)
+
+        # 记录结果用于滚动胜率
+        t1_det = self.t1_detectors.get(sym_key)
+        if t1_det:
+            win = ev.pnl_pct > 0
+            t1_det.record_trade_result(win)
+
+        self.notifier.notify_type1_exit(
+            sym_key=sym_key,
+            direction=meta.get('direction', '?'),
+            entry_price=meta.get('entry_price', 0),
+            exit_price=ev.exit_price,
+            pnl_pct=ev.pnl_pct,
+            exit_reason=ev.exit_reason,
+            bars_held=ev.bars_held,
+            tier=tier_name,
+            preset=meta.get('preset', '?'),
+        )
+
+        if self.dashboard_state:
+            self.dashboard_state.remove_position(f't1_{sym_key}')
+
+        del self.t1_trackers[sym_key]
+        del self.t1_tracker_meta[sym_key]
+        self._save_state()
+        logger.info(f"Type1平仓: {sym_key} {tier_name} pnl={ev.pnl_pct:+.2f}% "
+                    f"{ev.exit_reason} {ev.bars_held}根")
+
+    # ================================================================
     #  重连
     # ================================================================
     def _reconnect(self):
@@ -591,6 +796,9 @@ class MonitorEngine:
                 trackers=self.trackers,
                 tracker_meta=self.tracker_meta,
                 bar_counts=self.bar_counts,
+                t1_detectors=self.t1_detectors,
+                t1_trackers=self.t1_trackers,
+                t1_tracker_meta=self.t1_tracker_meta,
             )
             self._last_save = time.time()
         except Exception as e:

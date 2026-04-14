@@ -959,6 +959,511 @@ class ExitTracker:
 
 
 # ============================================================
+#  Type1 信号检测 — 影线触碰EMA10（与ABC并行运行）
+# ============================================================
+
+@dataclass
+class Type1Signal:
+    """Type1 挂单信号"""
+    direction: str          # 'long' / 'short'
+    pending_price: float    # 挂单价（high+1tick 多，low-1tick 空）
+    stop_price: float       # 止损价（low-5tick 多，high+5tick 空）
+    expiry_bars: int        # 挂单有效根数（默认5）
+    bar_index: int          # 信号K线index
+    # 分级所需因子
+    stop_dist_atr: float    # 止损距离/ATR
+    er_40: float            # ER(40)
+    signal_density: int     # 最近10根内信号数
+    recent_win_n: int       # 最近5笔滚动胜率
+
+
+class Type1SignalDetector:
+    """
+    Type1 影线触碰EMA10信号检测状态机。
+    逐K线调用 process_bar()，管理挂单状态。
+
+    趋势：ER(20) > 0.3
+    方向：close > EMA60 做多，close < EMA60 做空
+    信号：影线碰EMA10弹回（close不破），prev_close未破EMA10
+    入场：信号K线 high+1tick 挂单（多），5根内未触发则撤，跳空不入
+    止损：信号K线 low - 5*tick
+    """
+
+    ER_THRESHOLD = 0.3
+    PENDING_EXPIRY = 5
+    STOP_TICKS = DEFAULT_STOP_TICKS  # 5
+
+    def __init__(self):
+        self._bar_index = -1
+        self._prev_close = None
+        self._prev_ema10 = None
+        self._prev_ema60_dir = 0  # 1=多 -1=空 0=未知
+
+        # 回踩计数（EMA60方向切换时重置）
+        self._touch_count_long = 0
+        self._touch_count_short = 0
+
+        # 信号密集度追踪
+        self._recent_signal_bars = []
+
+        # 滚动胜率（最近5笔的MFE>=止损距离视为赢）
+        self._recent_results = []  # list of bool (True=win)
+
+        # 挂单状态
+        self.pending = None  # dict or None
+
+    def process_bar(self, close: float, high: float, low: float, opn: float,
+                    ema10: float, ema60: float, er20: float, er40: float,
+                    atr: float, tick_size: float) -> Optional[Type1Signal]:
+        """
+        处理一根已收盘K线。
+
+        返回:
+          Type1Signal（新挂单信号）或 None
+
+        挂单成交/过期/跳空由调用方（monitor.py）在下一根bar处理。
+        """
+        self._bar_index += 1
+
+        if self._prev_close is None:
+            self._prev_close = close
+            self._prev_ema10 = ema10
+            return None
+
+        if np.isnan(er20) or np.isnan(atr) or np.isnan(ema10) or np.isnan(ema60) or atr <= 0:
+            self._prev_close = close
+            self._prev_ema10 = ema10
+            return None
+
+        # EMA60方向切换 → 重置回踩计数
+        curr_dir = 1 if close > ema60 else (-1 if close < ema60 else 0)
+        if curr_dir != self._prev_ema60_dir and self._prev_ema60_dir != 0:
+            if curr_dir == 1:
+                self._touch_count_long = 0
+            elif curr_dir == -1:
+                self._touch_count_short = 0
+        self._prev_ema60_dir = curr_dir
+
+        # 趋势过滤
+        if er20 <= self.ER_THRESHOLD:
+            self._prev_close = close
+            self._prev_ema10 = ema10
+            return None
+
+        # 方向判断
+        direction = None
+        if close > ema60:
+            direction = 'long'
+        elif close < ema60:
+            direction = 'short'
+
+        if direction is None:
+            self._prev_close = close
+            self._prev_ema10 = ema10
+            return None
+
+        # 信号检测
+        signal = None
+        tick = tick_size
+
+        if direction == 'long':
+            if (low <= ema10 and close > ema10
+                    and self._prev_close >= self._prev_ema10):
+                pending_price = _round_to_tick(high + tick, tick_size)
+                stop_price = _round_to_tick(low - self.STOP_TICKS * tick, tick_size)
+                self._touch_count_long += 1
+
+                # 因子计算
+                stop_dist_atr = abs(pending_price - stop_price) / atr
+                er_40_val = er40 if not np.isnan(er40) else 0.0
+
+                # 信号密集度
+                self._recent_signal_bars = [b for b in self._recent_signal_bars
+                                            if b >= self._bar_index - 10]
+                density = len(self._recent_signal_bars)
+                self._recent_signal_bars.append(self._bar_index)
+
+                # 滚动胜率
+                recent_win_n = sum(self._recent_results[-5:]) if self._recent_results else -1
+
+                signal = Type1Signal(
+                    direction='long',
+                    pending_price=pending_price,
+                    stop_price=stop_price,
+                    expiry_bars=self.PENDING_EXPIRY,
+                    bar_index=self._bar_index,
+                    stop_dist_atr=round(stop_dist_atr, 4),
+                    er_40=round(er_40_val, 4),
+                    signal_density=density,
+                    recent_win_n=recent_win_n,
+                )
+
+        elif direction == 'short':
+            if (high >= ema10 and close < ema10
+                    and self._prev_close <= self._prev_ema10):
+                pending_price = _round_to_tick(low - tick, tick_size)
+                stop_price = _round_to_tick(high + self.STOP_TICKS * tick, tick_size)
+                self._touch_count_short += 1
+
+                stop_dist_atr = abs(pending_price - stop_price) / atr
+                er_40_val = er40 if not np.isnan(er40) else 0.0
+
+                self._recent_signal_bars = [b for b in self._recent_signal_bars
+                                            if b >= self._bar_index - 10]
+                density = len(self._recent_signal_bars)
+                self._recent_signal_bars.append(self._bar_index)
+
+                recent_win_n = sum(self._recent_results[-5:]) if self._recent_results else -1
+
+                signal = Type1Signal(
+                    direction='short',
+                    pending_price=pending_price,
+                    stop_price=stop_price,
+                    expiry_bars=self.PENDING_EXPIRY,
+                    bar_index=self._bar_index,
+                    stop_dist_atr=round(stop_dist_atr, 4),
+                    er_40=round(er_40_val, 4),
+                    signal_density=density,
+                    recent_win_n=recent_win_n,
+                )
+
+        # 新信号替换旧挂单
+        if signal is not None:
+            self.pending = {
+                'signal': signal,
+                'expiry_bar': self._bar_index + self.PENDING_EXPIRY,
+            }
+
+        self._prev_close = close
+        self._prev_ema10 = ema10
+        return signal
+
+    def check_fill(self, high: float, low: float, opn: float) -> Optional[dict]:
+        """
+        检查挂单是否成交。每根新bar调用。
+
+        返回:
+          {'status': 'filled', 'signal': Type1Signal} — 成交
+          {'status': 'gap_skip'} — 跳空跳过
+          {'status': 'expired'} — 过期
+          None — 继续等待
+        """
+        if self.pending is None:
+            return None
+
+        sig = self.pending['signal']
+
+        # 过期
+        # 注意：monitor.py 中 check_fill 在 process_bar 之前调用，
+        # _bar_index 落后1根，所以用 >= 补偿，确保挂单只有效5根
+        if self._bar_index >= self.pending['expiry_bar']:
+            self.pending = None
+            return {'status': 'expired'}
+
+        # 跳空检查
+        if sig.direction == 'long':
+            if opn > sig.pending_price:
+                self.pending = None
+                return {'status': 'gap_skip'}
+            if high >= sig.pending_price:
+                self.pending = None
+                return {'status': 'filled', 'signal': sig}
+        else:
+            if opn < sig.pending_price:
+                self.pending = None
+                return {'status': 'gap_skip'}
+            if low <= sig.pending_price:
+                self.pending = None
+                return {'status': 'filled', 'signal': sig}
+
+        return None
+
+    def record_trade_result(self, win: bool):
+        """记录一笔交易结果（用于滚动胜率计算）"""
+        self._recent_results.append(win)
+        # 只保留最近20笔
+        if len(self._recent_results) > 20:
+            self._recent_results = self._recent_results[-20:]
+
+    def to_dict(self) -> dict:
+        return {
+            '_bar_index': self._bar_index,
+            '_prev_close': self._prev_close,
+            '_prev_ema10': self._prev_ema10,
+            '_prev_ema60_dir': self._prev_ema60_dir,
+            '_touch_count_long': self._touch_count_long,
+            '_touch_count_short': self._touch_count_short,
+            '_recent_signal_bars': self._recent_signal_bars,
+            '_recent_results': self._recent_results,
+            'pending': {
+                'signal': {
+                    'direction': self.pending['signal'].direction,
+                    'pending_price': self.pending['signal'].pending_price,
+                    'stop_price': self.pending['signal'].stop_price,
+                    'expiry_bars': self.pending['signal'].expiry_bars,
+                    'bar_index': self.pending['signal'].bar_index,
+                    'stop_dist_atr': self.pending['signal'].stop_dist_atr,
+                    'er_40': self.pending['signal'].er_40,
+                    'signal_density': self.pending['signal'].signal_density,
+                    'recent_win_n': self.pending['signal'].recent_win_n,
+                },
+                'expiry_bar': self.pending['expiry_bar'],
+            } if self.pending else None,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'Type1SignalDetector':
+        det = cls()
+        det._bar_index = d.get('_bar_index', -1)
+        det._prev_close = d.get('_prev_close')
+        det._prev_ema10 = d.get('_prev_ema10')
+        det._prev_ema60_dir = d.get('_prev_ema60_dir', 0)
+        det._touch_count_long = d.get('_touch_count_long', 0)
+        det._touch_count_short = d.get('_touch_count_short', 0)
+        det._recent_signal_bars = d.get('_recent_signal_bars', [])
+        det._recent_results = d.get('_recent_results', [])
+        p = d.get('pending')
+        if p and p.get('signal'):
+            s = p['signal']
+            det.pending = {
+                'signal': Type1Signal(**s),
+                'expiry_bar': p['expiry_bar'],
+            }
+        return det
+
+
+def _round_to_tick(price: float, tick_size: float) -> float:
+    """四舍五入到最近的 tick"""
+    return round(round(price / tick_size) * tick_size, 10)
+
+
+def classify_type1_tier(stop_dist_atr: float, recent_win_n: int,
+                        er_40: float, signal_density: int) -> tuple:
+    """
+    Type1 子场景分级。
+
+    返回: (tier_name, ladder_preset)
+      tier_name: 'alpha-1'...'gamma'
+      ladder_preset: 'I' / '2R' / None(γ不做)
+    """
+    stop_ok = stop_dist_atr < 1.5
+    hot4 = recent_win_n >= 4
+    hot3 = recent_win_n >= 3
+    er40_ok = er_40 >= 0.42
+    density_ok = signal_density >= 1
+
+    # α: 双核命中
+    if stop_ok and hot4:
+        return ('alpha-1', 'I')
+    if stop_ok and er40_ok:
+        return ('alpha-2', 'I')
+    if hot4 and er40_ok:
+        return ('alpha-3', 'I')
+    # β
+    if stop_ok and hot3:
+        return ('beta-1', 'I')
+    if hot4 and density_ok and not stop_ok and not er40_ok:
+        return ('beta-2', '2R')
+    # γ
+    return ('gamma', None)
+
+
+TYPE1_TIER_NAMES = {
+    'alpha-1': 'α-1: stop<1.5+热手≥4',
+    'alpha-2': 'α-2: stop<1.5+ER40≥0.42',
+    'alpha-3': 'α-3: 热手≥4+ER40≥0.42',
+    'beta-1': 'β-1: stop<1.5+热手≥3',
+    'beta-2': 'β-2: 热手≥4+density≥1',
+    'gamma': 'γ不做',
+}
+
+
+# ============================================================
+#  LadderRTracker — 阶梯R倍数移动止损（Type1专用）
+# ============================================================
+
+class LadderRTracker:
+    """
+    阶梯R倍数移动止损。
+
+    两种预设模式：
+      'I':  1→0, 3→1, 之后每+2R（5→3, 7→5, ...）—— α/β-1最优
+      '2R': 均匀2R步长（2→0, 4→2, 6→4, ...）—— β-2最优
+
+    也可自定义 steps 列表。
+
+    逻辑：
+      - 价格到达 trigger_r 时，止损移至 move_to_r
+      - 盘中触损出场
+      - 60根窗口超时按收盘价结算
+    """
+
+    # 预设方案
+    PRESETS = {
+        'I': [(1, 0), (3, 1)],    # 之后自动续 +2R
+        '2R': [(2, 0)],           # 之后自动续 +2R
+    }
+
+    def __init__(self, direction: str, entry_price: float,
+                 stop_price: float, tick_size: float,
+                 preset: str = 'I', max_window: int = 60):
+        self.direction = direction
+        self.is_long = (direction == 'long')
+        self.entry_price = entry_price
+        self.stop_price = stop_price  # 初始止损
+        self.tick_size = tick_size
+        self.stop_dist = abs(entry_price - stop_price)
+        self.max_window = max_window
+        self.preset = preset
+
+        # 构建阶梯表（预生成足够多的台阶）
+        base_steps = self.PRESETS.get(preset, [(1, 0), (3, 1)])
+        self.steps = list(base_steps)
+        # 自动续接 +2R 直到 30R
+        if self.steps:
+            last_trigger = self.steps[-1][0]
+            last_move = self.steps[-1][1]
+            step_size = last_trigger - last_move  # 间距
+            while last_trigger < 30:
+                last_trigger += step_size
+                last_move += step_size
+                self.steps.append((last_trigger, last_move))
+
+        # 状态
+        self.curr_stop = stop_price
+        self.curr_stop_r = -1.0
+        self.next_step_idx = 0
+        self.max_r_reached = 0.0
+        self.bars = 0
+        self.done = False
+        self.strategy_name = f'LR_{preset}'
+
+    def process_bar(self, close: float, high: float, low: float) -> Optional[ExitEvent]:
+        """
+        处理一根已收盘K线。返回 ExitEvent 或 None。
+        只需要 close/high/low，不依赖均线。
+        """
+        if self.done:
+            return None
+
+        self.bars += 1
+
+        # 1. 检查止损（盘中触发）
+        if self.is_long:
+            if low <= self.curr_stop:
+                self.done = True
+                pnl = (self.curr_stop - self.entry_price) / self.entry_price * 100
+                reason = 'stop' if self.curr_stop_r < 0 else 'trail_stop'
+                return ExitEvent(
+                    strategy=self.strategy_name,
+                    exit_price=self.curr_stop,
+                    exit_reason=reason,
+                    bars_held=self.bars,
+                    pnl_pct=round(pnl, 4),
+                )
+            bar_r = (high - self.entry_price) / self.stop_dist
+        else:
+            if high >= self.curr_stop:
+                self.done = True
+                pnl = (self.entry_price - self.curr_stop) / self.entry_price * 100
+                reason = 'stop' if self.curr_stop_r < 0 else 'trail_stop'
+                return ExitEvent(
+                    strategy=self.strategy_name,
+                    exit_price=self.curr_stop,
+                    exit_reason=reason,
+                    bars_held=self.bars,
+                    pnl_pct=round(pnl, 4),
+                )
+            bar_r = (self.entry_price - low) / self.stop_dist
+
+        # 2. 更新最大R
+        if bar_r > self.max_r_reached:
+            self.max_r_reached = bar_r
+
+        # 3. 阶梯升级
+        while self.next_step_idx < len(self.steps):
+            trigger_r, move_to_r = self.steps[self.next_step_idx]
+            if self.max_r_reached >= trigger_r:
+                if self.is_long:
+                    new_stop = self.entry_price + move_to_r * self.stop_dist
+                else:
+                    new_stop = self.entry_price - move_to_r * self.stop_dist
+                if (self.is_long and new_stop > self.curr_stop) or \
+                   (not self.is_long and new_stop < self.curr_stop):
+                    self.curr_stop = new_stop
+                    self.curr_stop_r = move_to_r
+                self.next_step_idx += 1
+            else:
+                break
+
+        # 4. 窗口超时
+        if self.bars >= self.max_window:
+            self.done = True
+            pnl = ((close - self.entry_price) if self.is_long
+                   else (self.entry_price - close)) / self.entry_price * 100
+            return ExitEvent(
+                strategy=self.strategy_name,
+                exit_price=close,
+                exit_reason='timeout',
+                bars_held=self.bars,
+                pnl_pct=round(pnl, 4),
+            )
+
+        return None
+
+    def force_close(self, close_price: float) -> Optional[ExitEvent]:
+        """强制平仓（回测结束时调用）"""
+        if self.done:
+            return None
+        self.done = True
+        pnl = ((close_price - self.entry_price) if self.is_long
+               else (self.entry_price - close_price)) / self.entry_price * 100
+        return ExitEvent(
+            strategy=self.strategy_name,
+            exit_price=close_price,
+            exit_reason='backtest_end',
+            bars_held=self.bars,
+            pnl_pct=round(pnl, 4),
+        )
+
+    def to_dict(self) -> dict:
+        """序列化（监控状态持久化用）"""
+        return {
+            'direction': self.direction,
+            'entry_price': self.entry_price,
+            'stop_price': self.stop_price,
+            'tick_size': self.tick_size,
+            'preset': self.preset,
+            'max_window': self.max_window,
+            'curr_stop': self.curr_stop,
+            'curr_stop_r': self.curr_stop_r,
+            'next_step_idx': self.next_step_idx,
+            'max_r_reached': self.max_r_reached,
+            'bars': self.bars,
+            'done': self.done,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'LadderRTracker':
+        """从dict恢复"""
+        tracker = cls(
+            direction=d['direction'],
+            entry_price=d['entry_price'],
+            stop_price=d['stop_price'],
+            tick_size=d['tick_size'],
+            preset=d.get('preset', 'I'),
+            max_window=d.get('max_window', 60),
+        )
+        tracker.curr_stop = d['curr_stop']
+        tracker.curr_stop_r = d.get('curr_stop_r', -1.0)
+        tracker.next_step_idx = d.get('next_step_idx', 0)
+        tracker.max_r_reached = d.get('max_r_reached', 0.0)
+        tracker.bars = d.get('bars', 0)
+        tracker.done = d.get('done', False)
+        return tracker
+
+
+# ============================================================
 #  场景分类（全局共享）
 # ============================================================
 

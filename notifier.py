@@ -197,7 +197,69 @@ class PushPlusNotifier:
         return self._send(title, content)
 
     # ================================================================
-    #  4. 系统事件通知
+    #  4. Type1 信号通知
+    # ================================================================
+
+    def notify_type1_signal(self, sym_key: str, direction: str,
+                            pending_price: float, stop_price: float,
+                            tier: str, preset: str,
+                            stop_dist_atr: float = 0, er_40: float = 0,
+                            recent_win_n: int = -1):
+        """Type1 挂单信号推送"""
+        name = self._sym_label(sym_key)
+        dl = self._dir_label(direction)
+
+        title = f"【T1挂单】{name}{dl} {tier}"
+
+        content = (f"{name}{dl} 挂单{pending_price:.0f} 止损{stop_price:.0f}\n<hr>"
+                   f"<h3>[Type1] {name}{dl} 挂单信号</h3>"
+                   f"<p>分级: {tier} | 出场: LR_{preset}</p>"
+                   f"<p>挂单价: {pending_price} | 止损: {stop_price}</p>"
+                   f"<p>止损/ATR: {stop_dist_atr:.2f} | ER40: {er_40:.2f} | 热手: {recent_win_n}</p>"
+                   f"<p>挂单5根有效，跳空不入</p>")
+
+        return self._send(title, content)
+
+    def notify_type1_fill(self, sym_key: str, direction: str,
+                          entry_price: float, stop_price: float,
+                          tier: str, preset: str):
+        """Type1 挂单成交推送"""
+        name = self._sym_label(sym_key)
+        dl = self._dir_label(direction)
+
+        title = f"【T1成交】{name}{dl} {tier}"
+
+        content = (f"{name}{dl} 成交{entry_price:.0f} 止损{stop_price:.0f}\n<hr>"
+                   f"<h3>[Type1] {name}{dl} 挂单成交</h3>"
+                   f"<p>分级: {tier} | 出场: LR_{preset}</p>"
+                   f"<p>成交价: {entry_price} | 止损: {stop_price}</p>"
+                   f"<p>阶梯规则: {'1→0,3→1,+2R' if preset == 'I' else '2→0,4→2,+2R'}</p>")
+
+        return self._send(title, content)
+
+    def notify_type1_exit(self, sym_key: str, direction: str,
+                          entry_price: float, exit_price: float,
+                          pnl_pct: float, exit_reason: str,
+                          bars_held: int, tier: str, preset: str):
+        """Type1 平仓推送"""
+        name = self._sym_label(sym_key)
+        dl = self._dir_label(direction)
+        sign = "+" if pnl_pct >= 0 else ""
+
+        title = f"【T1平仓】{name}{dl} {sign}{pnl_pct:.1f}%"
+
+        content = (f"入{entry_price:.0f}出{exit_price:.0f} 持仓{bars_held}根~{bars_held*10}分钟\n<hr>"
+                   f"<h3>[Type1] {name}{dl} 平仓 {sign}{pnl_pct:.1f}%</h3>"
+                   f"<p>分级: {tier} | 出场: LR_{preset}</p>"
+                   f"<p>入场: {entry_price} → 出场: <b>{exit_price}</b></p>"
+                   f"<p>持仓: {bars_held}根K线 (~{bars_held*10}分钟)</p>"
+                   f"<p>出场原因: {exit_reason}</p>")
+
+        self._stop_last_sent.pop(sym_key, None)
+        return self._send(title, content)
+
+    # ================================================================
+    #  5. 系统事件通知
     # ================================================================
     def notify_system_event(self, event: str, details: str = ""):
         """
