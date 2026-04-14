@@ -58,6 +58,7 @@ class MonitorEngine:
         self.t1_tracker_meta: dict[str, dict] = {}
 
         self.kline_serials: dict[str, object] = {}
+        self.quotes: dict[str, object] = {}  # 主连quote（含underlying_symbol）
         self.bar_counts: dict[str, int] = {}
         # 每品种最后处理的K线时间戳（用于检测新K线）
         self.last_bar_dt: dict[str, pd.Timestamp] = {}
@@ -122,7 +123,7 @@ class MonitorEngine:
         logger.info("天勤连接成功")
 
     def _subscribe_all(self):
-        """订阅全部品种的10分钟K线"""
+        """订阅全部品种的10分钟K线 + 主连quote（用于获取主力合约代码）"""
         for sym_key in self.config.symbols:
             tq_symbol = f"KQ.m@{sym_key}"
             try:
@@ -132,6 +133,8 @@ class MonitorEngine:
                     data_length=2000,      # 约35天，足够EMA120预热
                 )
                 self.kline_serials[sym_key] = serial
+                # 订阅主连quote，underlying_symbol字段是当前主力合约代码
+                self.quotes[sym_key] = self.api.get_quote(tq_symbol)
                 logger.debug(f"已订阅: {sym_key}")
             except Exception as e:
                 logger.error(f"订阅失败 {sym_key}: {e}")
@@ -139,6 +142,22 @@ class MonitorEngine:
         # 等待初始数据加载
         self.api.wait_update()
         logger.info(f"已订阅 {len(self.kline_serials)} 个品种")
+
+    def _get_dominant_info(self, sym_key: str) -> tuple:
+        """获取主力合约代码和实时价格，返回 (合约简称, 实时价) 或 (None, None)"""
+        quote = self.quotes.get(sym_key)
+        if quote is None:
+            return None, None
+        try:
+            underlying = quote.underlying_symbol  # 如 'SHFE.ag2506'
+            last_price = quote.last_price
+            if underlying and last_price == last_price:  # NaN check
+                # 取简称: 'SHFE.ag2506' -> 'ag2506'
+                short_name = underlying.split('.', 1)[-1] if '.' in underlying else underlying
+                return short_name, last_price
+        except Exception:
+            pass
+        return None, None
 
     # ================================================================
     #  状态恢复 & 预热
@@ -402,6 +421,7 @@ class MonitorEngine:
                 if su.strategy == exit_strategy or (
                     exit_strategy == 'S5.1' and su.strategy in ('S2', 'S3.1')
                 ):
+                    dom_c, dom_p = self._get_dominant_info(sym_key)
                     self.notifier.notify_stop_moved(
                         sym_key=sym_key,
                         direction=tracker.direction,
@@ -409,6 +429,8 @@ class MonitorEngine:
                         old_stop=su.old_stop,
                         new_stop=su.new_stop,
                         current_price=close,
+                        dominant_contract=dom_c,
+                        dominant_price=dom_p,
                     )
                     now_str = datetime.now().isoformat()
                     if self.signal_db and 'signal_id' in meta:
@@ -425,6 +447,7 @@ class MonitorEngine:
             # 平仓通知
             for ev in exit_events:
                 if ev.strategy == exit_strategy:
+                    dom_c, dom_p = self._get_dominant_info(sym_key)
                     self.notifier.notify_position_closed(
                         sym_key=sym_key,
                         direction=tracker.direction,
@@ -435,6 +458,8 @@ class MonitorEngine:
                         exit_reason=ev.exit_reason,
                         bars_held=ev.bars_held,
                         scenario=meta['scenario'],
+                        dominant_contract=dom_c,
+                        dominant_price=dom_p,
                     )
                     now_str = datetime.now().isoformat()
                     if self.signal_db and 'signal_id' in meta:
@@ -576,6 +601,7 @@ class MonitorEngine:
             initial_stop = signal.pullback_extreme + tick
 
         # 推送通知
+        dom_c, dom_p = self._get_dominant_info(sym_key)
         self.notifier.notify_new_signal(
             sym_key=sym_key,
             direction=signal.direction,
@@ -594,6 +620,8 @@ class MonitorEngine:
             ema10=float(row['ema10']),
             ema20=float(row['ema20']),
             ema120=float(row['ema120']),
+            dominant_contract=dom_c,
+            dominant_price=dom_p,
         )
 
         # 记录到数据库
@@ -658,6 +686,7 @@ class MonitorEngine:
 
         # 推送挂单信号
         tier_name = TYPE1_TIER_NAMES.get(tier, tier)
+        dom_c, dom_p = self._get_dominant_info(sym_key)
         self.notifier.notify_type1_signal(
             sym_key=sym_key,
             direction=signal.direction,
@@ -668,6 +697,8 @@ class MonitorEngine:
             stop_dist_atr=signal.stop_dist_atr,
             er_40=signal.er_40,
             recent_win_n=signal.recent_win_n,
+            dominant_contract=dom_c,
+            dominant_price=dom_p,
         )
 
         logger.info(f"Type1信号: {sym_key} {signal.direction} {tier_name} "
@@ -702,6 +733,7 @@ class MonitorEngine:
         }
 
         tier_name = TYPE1_TIER_NAMES.get(tier, tier)
+        dom_c, dom_p = self._get_dominant_info(sym_key)
         self.notifier.notify_type1_fill(
             sym_key=sym_key,
             direction=signal.direction,
@@ -709,6 +741,8 @@ class MonitorEngine:
             stop_price=signal.stop_price,
             tier=tier_name,
             preset=preset,
+            dominant_contract=dom_c,
+            dominant_price=dom_p,
         )
 
         if self.dashboard_state:
@@ -740,6 +774,7 @@ class MonitorEngine:
             win = ev.pnl_pct > 0
             t1_det.record_trade_result(win)
 
+        dom_c, dom_p = self._get_dominant_info(sym_key)
         self.notifier.notify_type1_exit(
             sym_key=sym_key,
             direction=meta.get('direction', '?'),
@@ -750,6 +785,8 @@ class MonitorEngine:
             bars_held=ev.bars_held,
             tier=tier_name,
             preset=meta.get('preset', '?'),
+            dominant_contract=dom_c,
+            dominant_price=dom_p,
         )
 
         if self.dashboard_state:

@@ -82,6 +82,18 @@ class PushPlusNotifier:
     # ================================================================
     #  1. 新信号通知
     # ================================================================
+    def _dominant_line(self, dominant_contract, dominant_price):
+        """生成主力合约信息HTML行，无信息时返回空字符串"""
+        if dominant_contract and dominant_price is not None:
+            return f"<p>📌 主力合约: <b>{dominant_contract}</b> | 实时价: <b>{dominant_price:.0f}</b></p>"
+        return ""
+
+    def _dominant_tag(self, dominant_contract, dominant_price):
+        """生成主力合约简短标签，用于summary_line"""
+        if dominant_contract and dominant_price is not None:
+            return f" | {dominant_contract}@{dominant_price:.0f}"
+        return ""
+
     def notify_new_signal(self, sym_key: str, direction: str,
                           signal_type: str, pullback_bars: int,
                           entry_price: float, initial_stop: float,
@@ -91,10 +103,12 @@ class PushPlusNotifier:
                           er40: float = None, er5_delta_6: float = None,
                           er40_delta_12: float = None,
                           ema10: float = None, ema20: float = None,
-                          ema120: float = None):
+                          ema120: float = None,
+                          dominant_contract: str = None,
+                          dominant_price: float = None):
         """
         title(工单名称): 【开仓】空PVC C4根 2x
-        content第一行(设备名称): 入5407 止5473 ER0.55 S2出 2.3ATR
+        content第一行(设备名称): 入5407 止5473 ER0.55 S2出 2.3ATR | v2506@5410
         """
         name = self._sym_label(sym_key)
         dl = self._dir_label(direction)
@@ -103,13 +117,15 @@ class PushPlusNotifier:
         title = f"【开仓】{dl}{name} {pb} {position_multiplier}x"
 
         summary_line = (f"入{entry_price:.0f} 止{initial_stop:.0f} "
-                        f"ER{er20:.2f} {exit_strategy}出 {deviation_atr:.1f}ATR")
+                        f"ER{er20:.2f} {exit_strategy}出 {deviation_atr:.1f}ATR"
+                        f"{self._dominant_tag(dominant_contract, dominant_price)}")
 
         # 详情 HTML
         lines = [
             summary_line,
             f"<hr>",
             f"<h3>{dl}{name} ({sym_key})</h3>",
+            self._dominant_line(dominant_contract, dominant_price),
             f"<p>{SCENARIO_NAMES.get(scenario, f'场景{scenario}')}</p>",
             f"<p>入场价: <b>{entry_price}</b> | 初始止损: <b>{initial_stop}</b></p>",
             f"<p>偏离: {deviation_atr:.2f}ATR | ER(20): {er20:.2f}",
@@ -137,7 +153,8 @@ class PushPlusNotifier:
         else:
             lines.append(f"<p>仓位: {position_multiplier}x</p>")
 
-        content = "\n".join(lines)
+        # 过滤空行
+        content = "\n".join(l for l in lines if l)
         return self._send(title, content)
 
     # ================================================================
@@ -145,10 +162,12 @@ class PushPlusNotifier:
     # ================================================================
     def notify_stop_moved(self, sym_key: str, direction: str,
                           strategy: str, old_stop: float, new_stop: float,
-                          current_price: float):
+                          current_price: float,
+                          dominant_contract: str = None,
+                          dominant_price: float = None):
         """
         title(工单名称): PVC空 止损↓ 5473→5420
-        content第一行(设备名称): 现价5398 策略S2
+        content第一行(设备名称): 现价5398 策略S2 | v2506@5400
         """
         now = time.time()
         last = self._stop_last_sent.get(sym_key, 0)
@@ -166,11 +185,13 @@ class PushPlusNotifier:
 
         title = f"【止损】{name}{dl} {arrow}{old_stop:.0f}→{new_stop:.0f}"
 
-        content = (f"现价{current_price:.0f} 策略{strategy}\n<hr>"
+        content = (f"现价{current_price:.0f} 策略{strategy}"
+                   f"{self._dominant_tag(dominant_contract, dominant_price)}\n<hr>"
                    f"<p>品种: {name} ({sym_key}) {dl}</p>"
                    f"<p>策略: {strategy}</p>"
                    f"<p>止损: {old_stop} → <b>{new_stop}</b></p>"
-                   f"<p>当前价: {current_price}</p>")
+                   f"<p>当前价: {current_price}</p>"
+                   f"{self._dominant_line(dominant_contract, dominant_price)}")
 
         self._stop_last_sent[sym_key] = now
         return self._send(title, content)
@@ -182,7 +203,9 @@ class PushPlusNotifier:
                                entry_price: float, exit_price: float,
                                pnl_pct: float, exit_strategy: str,
                                exit_reason: str, bars_held: int,
-                               scenario: int):
+                               scenario: int,
+                               dominant_contract: str = None,
+                               dominant_price: float = None):
         """
         title(工单名称): PVC空 平仓+2.3% S2
         content第一行(设备名称): 入5407出5281 持仓15根~150分钟
@@ -200,7 +223,8 @@ class PushPlusNotifier:
                    f"<p>场景: {scenario} | 策略: {exit_strategy}</p>"
                    f"<p>入场: {entry_price} → 出场: <b>{exit_price}</b></p>"
                    f"<p>持仓: {bars_held}根K线 (~{bars_held*10}分钟)</p>"
-                   f"<p>出场原因: {exit_reason}</p>")
+                   f"<p>出场原因: {exit_reason}</p>"
+                   f"{self._dominant_line(dominant_contract, dominant_price)}")
 
         # 平仓后清除该品种的止损限流记录
         self._stop_last_sent.pop(sym_key, None)
@@ -214,15 +238,19 @@ class PushPlusNotifier:
                             pending_price: float, stop_price: float,
                             tier: str, preset: str,
                             stop_dist_atr: float = 0, er_40: float = 0,
-                            recent_win_n: int = -1):
+                            recent_win_n: int = -1,
+                            dominant_contract: str = None,
+                            dominant_price: float = None):
         """Type1 挂单信号推送"""
         name = self._sym_label(sym_key)
         dl = self._dir_label(direction)
 
         title = f"【T1挂单】{name}{dl} {tier}"
 
-        content = (f"{name}{dl} 挂单{pending_price:.0f} 止损{stop_price:.0f}\n<hr>"
+        content = (f"{name}{dl} 挂单{pending_price:.0f} 止损{stop_price:.0f}"
+                   f"{self._dominant_tag(dominant_contract, dominant_price)}\n<hr>"
                    f"<h3>[Type1] {name}{dl} 挂单信号</h3>"
+                   f"{self._dominant_line(dominant_contract, dominant_price)}"
                    f"<p>分级: {tier} | 出场: LR_{preset}</p>"
                    f"<p>挂单价: {pending_price} | 止损: {stop_price}</p>"
                    f"<p>止损/ATR: {stop_dist_atr:.2f} | ER40: {er_40:.2f} | 热手: {recent_win_n}</p>"
@@ -232,15 +260,19 @@ class PushPlusNotifier:
 
     def notify_type1_fill(self, sym_key: str, direction: str,
                           entry_price: float, stop_price: float,
-                          tier: str, preset: str):
+                          tier: str, preset: str,
+                          dominant_contract: str = None,
+                          dominant_price: float = None):
         """Type1 挂单成交推送"""
         name = self._sym_label(sym_key)
         dl = self._dir_label(direction)
 
         title = f"【T1成交】{name}{dl} {tier}"
 
-        content = (f"{name}{dl} 成交{entry_price:.0f} 止损{stop_price:.0f}\n<hr>"
+        content = (f"{name}{dl} 成交{entry_price:.0f} 止损{stop_price:.0f}"
+                   f"{self._dominant_tag(dominant_contract, dominant_price)}\n<hr>"
                    f"<h3>[Type1] {name}{dl} 挂单成交</h3>"
+                   f"{self._dominant_line(dominant_contract, dominant_price)}"
                    f"<p>分级: {tier} | 出场: LR_{preset}</p>"
                    f"<p>成交价: {entry_price} | 止损: {stop_price}</p>"
                    f"<p>阶梯规则: {'1→0,3→1,+2R' if preset == 'I' else '2→0,4→2,+2R'}</p>")
@@ -250,7 +282,9 @@ class PushPlusNotifier:
     def notify_type1_exit(self, sym_key: str, direction: str,
                           entry_price: float, exit_price: float,
                           pnl_pct: float, exit_reason: str,
-                          bars_held: int, tier: str, preset: str):
+                          bars_held: int, tier: str, preset: str,
+                          dominant_contract: str = None,
+                          dominant_price: float = None):
         """Type1 平仓推送"""
         name = self._sym_label(sym_key)
         dl = self._dir_label(direction)
@@ -260,6 +294,7 @@ class PushPlusNotifier:
 
         content = (f"入{entry_price:.0f}出{exit_price:.0f} 持仓{bars_held}根~{bars_held*10}分钟\n<hr>"
                    f"<h3>[Type1] {name}{dl} 平仓 {sign}{pnl_pct:.1f}%</h3>"
+                   f"{self._dominant_line(dominant_contract, dominant_price)}"
                    f"<p>分级: {tier} | 出场: LR_{preset}</p>"
                    f"<p>入场: {entry_price} → 出场: <b>{exit_price}</b></p>"
                    f"<p>持仓: {bars_held}根K线 (~{bars_held*10}分钟)</p>"
