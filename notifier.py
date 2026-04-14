@@ -8,6 +8,7 @@ content = 点开详情看到，补充信息
 
 import time
 import logging
+import threading
 import requests
 from signal_core import SYMBOL_CONFIGS, SCENARIO_NAMES
 
@@ -37,10 +38,20 @@ class PushPlusNotifier:
             logger.warning("PushPlus token 未配置，跳过推送")
             return False
 
+        # 非阻塞推送：在后台线程发送，不卡主循环
+        threading.Thread(
+            target=self._send_sync,
+            args=(title, content or title),
+            daemon=True,
+        ).start()
+        return True
+
+    def _send_sync(self, title: str, content: str):
+        """实际HTTP发送（后台线程执行）"""
         payload = {
             "token": self.token,
             "title": title,
-            "content": content or title,
+            "content": content,
             "template": "html",
         }
 
@@ -50,13 +61,12 @@ class PushPlusNotifier:
                 data = resp.json()
                 if data.get("code") == 200:
                     logger.debug(f"推送成功: {title}")
-                    return True
+                    return
                 logger.warning(f"推送失败: {data}")
             except Exception as e:
                 logger.warning(f"推送异常 (attempt {attempt+1}): {e}")
             if attempt == 0:
                 time.sleep(1)
-        return False
 
     def _sym_label(self, sym_key: str) -> str:
         """SHFE.ag -> 白银"""

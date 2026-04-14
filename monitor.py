@@ -129,7 +129,7 @@ class MonitorEngine:
                 serial = self.api.get_kline_serial(
                     tq_symbol,
                     duration_seconds=600,  # 10分钟
-                    data_length=8964,      # 最大历史K线数
+                    data_length=2000,      # 约35天，足够EMA120预热
                 )
                 self.kline_serials[sym_key] = serial
                 logger.debug(f"已订阅: {sym_key}")
@@ -209,19 +209,19 @@ class MonitorEngine:
                 continue  # 已经是最新的
 
             if prev_count == 0:
-                # 冷启动：喂入全部历史（ABC + Type1）
-                logger.info(f"{sym_key}: 冷启动预热 {n} 根K线...")
+                # 冷启动：只预热最后500根（detector状态几十根就稳定）
+                warmup_start = max(0, n - 500)
+                logger.info(f"{sym_key}: 冷启动预热 {n - warmup_start} 根K线（跳过前{warmup_start}根）")
                 detector = self.detectors[sym_key]
                 t1_det = self.t1_detectors.get(sym_key)
                 cfg_sym = SYMBOL_CONFIGS[sym_key]
                 ts = cfg_sym['tick_size']
-                for i in range(n):
+                for i in range(warmup_start, n):
                     row = df.iloc[i]
                     detector.process_bar(
                         row['close'], row['high'], row['low'],
                         row['ema10'], row['ema20'], row['ema120'],
                     )
-                    # Type1 detector 也需要预热（建立 prev_close/ema10/方向/热手状态）
                     if t1_det:
                         t1_det.process_bar(
                             close=row['close'], high=row['high'],
@@ -233,7 +233,6 @@ class MonitorEngine:
                             atr=float(row.get('atr', 0) or 0),
                             tick_size=ts,
                         )
-                        # 预热期间不处理挂单（只建立状态）
                         t1_det.pending = None
                 self.bar_counts[sym_key] = n
             else:
@@ -319,19 +318,31 @@ class MonitorEngine:
     def _process_new_bars(self, sym_key: str):
         """检查并处理新完成的K线。
 
-        TqSdk的kline_serial是固定长度滑动窗口(data_length=8964)，
-        新K线完成后总行数不变，不能用len(df)判断。
-        改用最后已完成K线的时间戳来检测新K线。
+        优化：先用原始时间戳判断是否有新bar，只在有新bar时才算指标。
+        避免每个tick都重算全部EMA/ER/ATR。
         """
+        # 快速检查：有没有新完成的K线（不算指标）
+        serial = self.kline_serials[sym_key]
+        raw_dt = pd.to_datetime(serial['datetime'], unit='ns')
+        # serial最后一行是未完成K线，倒数第二行是最后已完成K线
+        n_raw = len(serial.dropna(subset=['close']))
+        if n_raw < 2:
+            return
+        last_completed_dt = raw_dt.iloc[n_raw - 2]
+        prev_dt = self.last_bar_dt.get(sym_key)
+
+        if prev_dt is not None and last_completed_dt <= prev_dt:
+            return  # 没有新bar，跳过（这里省掉了95%的无用计算）
+
+        # 确认有新bar，才算指标
         df = self._get_dataframe(sym_key)
         if df is None:
             return
 
-        n = len(df) - 1  # 最后一行是未完成K线（当前K线）
+        n = len(df) - 1
         if n < 1:
             return
 
-        # 最后一根已完成K线的时间戳
         last_completed_dt = df.iloc[n - 1]['datetime']
         prev_dt = self.last_bar_dt.get(sym_key)
 
