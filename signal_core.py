@@ -9,6 +9,7 @@
 出场：S1 当根新高追踪 + S2 回调追踪 + S3 前根新高追踪
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional, List
 
@@ -1030,7 +1031,7 @@ class Type1SignalDetector:
             self._prev_ema10 = ema10
             return None
 
-        if np.isnan(er20) or np.isnan(atr) or np.isnan(ema10) or np.isnan(ema60) or atr <= 0:
+        if math.isnan(er20) or math.isnan(atr) or math.isnan(ema10) or math.isnan(ema60) or atr <= 0:
             self._prev_close = close
             self._prev_ema10 = ema10
             return None
@@ -1075,7 +1076,7 @@ class Type1SignalDetector:
 
                 # 因子计算
                 stop_dist_atr = abs(pending_price - stop_price) / atr
-                er_40_val = er40 if not np.isnan(er40) else 0.0
+                er_40_val = er40 if not math.isnan(er40) else 0.0
 
                 # 信号密集度
                 self._recent_signal_bars = [b for b in self._recent_signal_bars
@@ -1106,7 +1107,7 @@ class Type1SignalDetector:
                 self._touch_count_short += 1
 
                 stop_dist_atr = abs(pending_price - stop_price) / atr
-                er_40_val = er40 if not np.isnan(er40) else 0.0
+                er_40_val = er40 if not math.isnan(er40) else 0.0
 
                 self._recent_signal_bars = [b for b in self._recent_signal_bars
                                             if b >= self._bar_index - 10]
@@ -1312,7 +1313,7 @@ class LadderRTracker:
         self.entry_price = entry_price
         self.stop_price = stop_price  # 初始止损
         self.tick_size = tick_size
-        self.stop_dist = abs(entry_price - stop_price)
+        self.stop_dist = abs(entry_price - stop_price) or tick_size  # 防止除零
         self.max_window = max_window
         self.preset = preset
 

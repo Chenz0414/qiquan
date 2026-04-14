@@ -449,46 +449,49 @@ class MonitorEngine:
         if signal is not None and sym_key not in self.trackers:
             self._on_new_signal(sym_key, signal, row)
 
-        # ============ Type1 系统 ============
-        t1_det = self.t1_detectors.get(sym_key)
-        if t1_det is None:
-            return
+        # ============ Type1 系统（独立 try/except，不影响ABC） ============
+        try:
+            t1_det = self.t1_detectors.get(sym_key)
+            if t1_det is None:
+                return
 
-        cfg_sym = SYMBOL_CONFIGS[sym_key]
-        ts = cfg_sym['tick_size']
-        er40_val = float(row.get('er_40', 0) or 0)
+            cfg_sym = SYMBOL_CONFIGS[sym_key]
+            ts = cfg_sym['tick_size']
+            er40_val = float(row.get('er_40', 0) or 0)
 
-        # 4. Type1 挂单成交检查
-        if t1_det.pending is not None and sym_key not in self.t1_trackers:
-            fill_result = t1_det.check_fill(
-                high=high, low=low, opn=float(row.get('open', 0) or 0))
-            if fill_result:
-                if fill_result['status'] == 'filled':
-                    self._on_type1_fill(sym_key, fill_result['signal'], row)
-                elif fill_result['status'] in ('expired', 'gap_skip'):
-                    logger.debug(f"{sym_key} Type1挂单{fill_result['status']}")
+            # 4. Type1 挂单成交检查
+            if t1_det.pending is not None and sym_key not in self.t1_trackers:
+                fill_result = t1_det.check_fill(
+                    high=high, low=low, opn=float(row.get('open', 0) or 0))
+                if fill_result:
+                    if fill_result['status'] == 'filled':
+                        self._on_type1_fill(sym_key, fill_result['signal'], row)
+                    elif fill_result['status'] in ('expired', 'gap_skip'):
+                        logger.debug(f"{sym_key} Type1挂单{fill_result['status']}")
 
-        # 5. Type1 出场追踪
-        if sym_key in self.t1_trackers:
-            ev = self.t1_trackers[sym_key].process_bar(close, high, low)
-            if ev:
-                self._on_type1_exit(sym_key, ev)
+            # 5. Type1 出场追踪
+            if sym_key in self.t1_trackers:
+                ev = self.t1_trackers[sym_key].process_bar(close, high, low)
+                if ev:
+                    self._on_type1_exit(sym_key, ev)
 
-        # 6. Type1 信号检测（始终喂数据保持状态，有持仓时忽略信号）
-        t1_signal = t1_det.process_bar(
-            close=close, high=high, low=low,
-            opn=float(row.get('open', 0) or 0),
-            ema10=ema10, ema60=float(row.get('ema60', 0) or 0),
-            er20=float(row.get('er_20', 0) or 0),
-            er40=er40_val,
-            atr=float(row.get('atr', 0) or 0),
-            tick_size=ts,
-        )
-        if t1_signal and sym_key not in self.t1_trackers:
-            self._on_type1_signal(sym_key, t1_signal, row)
-        elif sym_key in self.t1_trackers:
-            # 有持仓时清除pending，不开新单
-            t1_det.pending = None
+            # 6. Type1 信号检测（始终喂数据保持状态，有持仓时忽略信号）
+            t1_signal = t1_det.process_bar(
+                close=close, high=high, low=low,
+                opn=float(row.get('open', 0) or 0),
+                ema10=ema10, ema60=float(row.get('ema60', 0) or 0),
+                er20=float(row.get('er_20', 0) or 0),
+                er40=er40_val,
+                atr=float(row.get('atr', 0) or 0),
+                tick_size=ts,
+            )
+            if t1_signal and sym_key not in self.t1_trackers:
+                self._on_type1_signal(sym_key, t1_signal, row)
+            elif sym_key in self.t1_trackers:
+                # 有持仓时清除pending，不开新单
+                t1_det.pending = None
+        except Exception as e:
+            logger.error(f"{sym_key} Type1处理异常: {e}", exc_info=True)
 
     # ================================================================
     #  信号处理
@@ -741,8 +744,8 @@ class MonitorEngine:
         if self.dashboard_state:
             self.dashboard_state.remove_position(f't1_{sym_key}')
 
-        del self.t1_trackers[sym_key]
-        del self.t1_tracker_meta[sym_key]
+        self.t1_trackers.pop(sym_key, None)
+        self.t1_tracker_meta.pop(sym_key, None)
         self._save_state()
         logger.info(f"Type1平仓: {sym_key} {tier_name} pnl={ev.pnl_pct:+.2f}% "
                     f"{ev.exit_reason} {ev.bars_held}根")
