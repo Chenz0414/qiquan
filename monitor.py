@@ -542,8 +542,9 @@ class MonitorEngine:
 
         deviation_atr = abs(signal.entry_price - row['ema10']) / atr
 
-        # 场景分类
-        scenario = classify_scenario(signal.signal_type, er20, deviation_atr)
+        # 场景分类（带方向过滤：场景2空头已停做）
+        scenario = classify_scenario(signal.signal_type, er20, deviation_atr,
+                                     direction=signal.direction)
         if scenario is None:
             return
 

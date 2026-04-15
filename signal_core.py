@@ -1245,7 +1245,9 @@ def classify_type1_tier(stop_dist_atr: float, recent_win_n: int,
 
     返回: (tier_name, ladder_preset)
       tier_name: 'alpha-1'...'gamma'
-      ladder_preset: 'I' / '2R' / None(γ不做)
+      ladder_preset: 'I' / '2R' / None(不做)
+
+    2026-04-15更新：β-2停做（120天N=29 EV=-0.55 累计-10.4%，多空均负）
     """
     stop_ok = stop_dist_atr < 1.5
     hot4 = recent_win_n >= 4
@@ -1263,8 +1265,9 @@ def classify_type1_tier(stop_dist_atr: float, recent_win_n: int,
     # β
     if stop_ok and hot3:
         return ('beta-1', 'I')
+    # β-2 已停做（2026-04-15）：保留标签但不触发交易
     if hot4 and density_ok and not stop_ok and not er40_ok:
-        return ('beta-2', '2R')
+        return ('beta-2', None)
     # γ
     return ('gamma', None)
 
@@ -1468,21 +1471,30 @@ class LadderRTracker:
 #  场景分类（全局共享）
 # ============================================================
 
-def classify_scenario(sig_type: str, er20: float, deviation_atr: float):
+def classify_scenario(sig_type: str, er20: float, deviation_atr: float,
+                      direction: str = None):
     """
     判断信号属于哪个可操作场景，返回场景编号 1/2/3 或 None。
 
-    场景1: A类 + ER(20)>=0.5 + 偏离>=1.0ATR  → 用S2出场
-    场景2: C类 + 偏离>=2.0ATR                 → 用S2出场
+    场景1: A类 + ER(20)>=0.5 + 偏离>=1.0ATR  → 用S6出场
+    场景2: C类 + 偏离>=2.0ATR                 → 用S6出场（仅做多，2026-04-15验证空头120天EV=0）
     场景3: B类 + ER(20)>=0.5 + 偏离0.1~0.3ATR → 用S5.1出场
 
-    全局过滤: ER(20)>=0.7 正期望消失，不开仓。
+    全局过滤:
+      - ER(20)>=0.7 正期望消失，不开仓。
+      - 场景2空头：120天N=64，EV=-0.02，停做（需传direction参数）
+
+    参数:
+      direction: 'long'/'short'/None。None时不做方向过滤（向后兼容，老回测脚本用）。
     """
     if er20 >= 0.7:
         return None
     if sig_type == 'A' and er20 >= 0.5 and deviation_atr >= 1.0:
         return 1
     if sig_type == 'C' and deviation_atr >= 2.0:
+        # 场景2空头负期望，过滤
+        if direction == 'short':
+            return None
         return 2
     if sig_type == 'B' and er20 >= 0.5 and 0.1 <= deviation_atr < 0.3:
         return 3
