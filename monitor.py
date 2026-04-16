@@ -24,6 +24,15 @@ from data_loader import add_indicators, sym_name
 from monitor_config import MonitorConfig
 from notifier import PushPlusNotifier
 from state_manager import StateManager
+from contract_parser import get_sym_meta
+
+
+# 出场策略 → ExitTracker 止损属性名
+_EXIT_STOP_ATTR = {
+    "S1.1": "s11_stop", "S2": "s2_stop", "S2.1": "s21_stop",
+    "S3.1": "s31_stop", "S5.1": "s51_stop", "S5.2": "s52_stop",
+    "S6": "s6_stop", "S6.1": "s61_stop",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +478,9 @@ class MonitorEngine:
                             ev.bars_held, now_str)
                     if self.dashboard_state:
                         self.dashboard_state.remove_position(sym_key)
+                        if 'signal_id' in meta:
+                            self.dashboard_state.remove_portfolio_live(
+                                meta['signal_id'])
                         self.dashboard_state.push_event('position_closed', {
                             'sym_key': sym_key, 'pnl_pct': ev.pnl_pct,
                             'exit_price': ev.exit_price,
@@ -528,6 +540,144 @@ class MonitorEngine:
                 t1_det.pending = None
         except Exception as e:
             logger.error(f"{sym_key} Type1处理异常: {e}", exc_info=True)
+
+        # ============ Phase B2: 仪表盘状态回写 ============
+        try:
+            self._update_dashboard_bar(sym_key, df, idx)
+        except Exception as e:
+            logger.warning(f"{sym_key} dashboard 状态回写失败: {e}")
+
+    # ================================================================
+    #  Phase B2: Dashboard 状态回写
+    # ================================================================
+    def _update_dashboard_bar(self, sym_key: str, df: pd.DataFrame, idx: int):
+        """每根已完成 K 线后把 symbol_states / heatmap / candidate_pool /
+        portfolio_live 同步到 DashboardState。
+
+        所有写入都是幂等 dict.update，不改引擎语义；异常时仅告警不崩溃。
+        """
+        if not self.dashboard_state:
+            return
+
+        row = df.iloc[idx]
+        close = float(row['close'])
+        ema5 = float(row.get('ema5', 0) or 0)
+        ema10 = float(row['ema10'])
+        ema20 = float(row['ema20'])
+        ema60 = float(row.get('ema60', 0) or 0)
+        ema120 = float(row['ema120'])
+        er20 = float(row.get('er_20', 0) or 0)
+        er40 = float(row.get('er_40', 0) or 0)
+        atr = float(row.get('atr', 0) or 0)
+        deviation_atr = abs(close - ema10) / atr if atr > 0 else 0.0
+        bar_time = str(row['datetime'])
+
+        det = self.detectors.get(sym_key)
+        if det is None:
+            return
+        meta = get_sym_meta(sym_key)
+        has_pos = sym_key in self.trackers
+
+        # 1) symbol_states — 合约查询的数据底
+        self.dashboard_state.update_symbol_state(sym_key, {
+            "sym_name": meta.get("name"),
+            "sector": meta.get("sector"),
+            "last_price": close,
+            "last_er20": er20,
+            "last_er40": er40,
+            "last_atr": atr,
+            "deviation_atr": deviation_atr,
+            "ema5": ema5, "ema10": ema10, "ema20": ema20,
+            "ema60": ema60, "ema120": ema120,
+            "last_ema_snapshot": det.last_ema_snapshot,
+            "pullback_stage": det.pullback_stage,
+            "pullback_bar_count": det.pullback_bar_count,
+            "last_pullback_extreme": det.last_pullback_extreme,
+            "candidate_scenario": det.candidate_scenario,
+            "trend_dir": det.trend_dir,
+            "has_position": has_pos,
+            "bar_time": bar_time,
+        })
+        self.dashboard_state.update_bar_time(sym_key, bar_time)
+
+        # 2) symbol_heatmap cell
+        start = max(0, idx - 19)
+        sparkline = [float(c) for c in df['close'].iloc[start:idx + 1].tolist()]
+        self.dashboard_state.update_heatmap_cell(sym_key, {
+            "sym_key": sym_key,
+            "sym_name": meta.get("name"),
+            "sector": meta.get("sector"),
+            "trend_dir": det.trend_dir,
+            "er20": er20,
+            "deviation_atr": deviation_atr,
+            "last_price": close,
+            "sparkline_20": sparkline,
+            "has_candidate": det.candidate_scenario is not None,
+            "has_position": has_pos,
+            "bar_time": bar_time,
+        })
+
+        # 3) candidate_pool — peek 下一 bar/当 bar 可入场的预触发
+        tick = meta.get("tick_size", 1) or 1
+        try:
+            cand = det.peek_candidate(close)
+        except Exception:
+            cand = None
+        if cand:
+            trigger = float(cand.get("trigger_price") or close)
+            # distance_ticks：负值 = 已突破，需回调
+            diff_ticks = int(round((trigger - close) / tick)) if tick else None
+            if det.trend_dir == 1:
+                # 多头：trigger <= close（回到 EMA10）→ distance 负
+                distance = diff_ticks
+            else:
+                distance = -diff_ticks if diff_ticks is not None else None
+            self.dashboard_state.set_candidate(sym_key, {
+                "sym_key": sym_key,
+                "sym_name": meta.get("name"),
+                "sector": meta.get("sector"),
+                "kind": cand.get("kind"),
+                "sig_type": cand.get("sig_type"),
+                "trigger_price": trigger,
+                "current_price": close,
+                "distance_ticks": abs(diff_ticks) if diff_ticks is not None else None,
+                "direction_bias": "long" if det.trend_dir == 1 else "short",
+                "candidate_scenario": det.candidate_scenario,
+                "pullback_bars": cand.get("pullback_bars"),
+                "pullback_extreme": cand.get("pullback_extreme"),
+                "er20": er20, "deviation_atr": deviation_atr,
+                "bar_time": bar_time,
+            })
+        else:
+            if sym_key in self.dashboard_state.candidate_pool:
+                self.dashboard_state.set_candidate(sym_key, None)
+
+        # 4) portfolio_live — 当前持仓的 R 倍数 / 止损
+        if has_pos:
+            tr = self.trackers[sym_key]
+            tmeta = self.tracker_meta.get(sym_key, {})
+            exit_strategy = tmeta.get('exit_strategy', 'S6')
+            signal_id = tmeta.get('signal_id')
+            try:
+                cur_r = tr.current_r(close, exit_strategy=exit_strategy)
+            except Exception:
+                cur_r = None
+            stop_attr = _EXIT_STOP_ATTR.get(exit_strategy, "s6_stop")
+            current_stop = getattr(tr, stop_attr, None)
+            if signal_id is not None:
+                self.dashboard_state.update_portfolio_live(signal_id, {
+                    "signal_id": signal_id,
+                    "sym_key": sym_key,
+                    "sym_name": meta.get("name"),
+                    "direction": tr.direction,
+                    "entry_price": tmeta.get('entry_price'),
+                    "initial_stop": tmeta.get('initial_stop'),
+                    "current_price": close,
+                    "current_stop": current_stop,
+                    "current_r": cur_r,
+                    "exit_strategy": exit_strategy,
+                    "bar_time": bar_time,
+                })
 
     # ================================================================
     #  信号处理
