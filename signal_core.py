@@ -11,7 +11,29 @@
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Callable, Any
+
+
+# ============================================================
+#  RejectObserver — 拒绝埋点观察者（Web 监控用，回测默认 None 不触发）
+# ============================================================
+
+class RejectObserver:
+    """
+    可选的拒绝原因埋点观察者。
+
+    monitor.py 在引擎启动时注入实现；backtest_engine / 离线回测脚本不注入，
+    detectors 调用 `emit(...)` 时会先判断 observer 是否为 None，确保回测 MD5
+    与旧版本 bit-level 一致。
+
+    子类实现 emit()，典型实现是把 (sym_key, stage, reason, context) 推入
+    DashboardState.reject_stream + SQLite.rejected_signals。
+    """
+
+    def emit(self, sym_key: str, stage: str, reason: str,
+             context: Optional[dict] = None) -> None:
+        """基类默认 no-op；具体落盘由子类覆写。"""
+        return None
 
 
 # ============================================================
@@ -140,9 +162,24 @@ class SignalDetector:
         # K线计数器
         self._bar_index: int = -1
 
+        # ---- 可观察字段（仅 bar 末尾赋值，不影响信号检测逻辑） ----
+        # Web 侧读取这些字段渲染"当前品种处于什么状态"，回测无人读取即可忽略。
+        self.sym_key: Optional[str] = None           # 可选，monitor.py 注入后用于 reject_observer
+        self.last_ema_snapshot: Optional[dict] = None  # {'ema10','ema20','ema120','close'}
+        self.pullback_stage: str = 'normal'          # 'normal' / 'pulling_back'
+        self.pullback_bar_count: int = 0             # 当前回调已持续多少根
+        self.last_pullback_extreme: Optional[float] = None  # 当前回调极值
+        self.candidate_scenario: Optional[int] = None  # 推演下一根 close 若收回 EMA10 可能落在哪个场景
+        self.last_reject_reasons: List[dict] = []    # 最近一根 bar 的拒绝清单
+        self.reject_observer: Optional[RejectObserver] = None
+
     def reset(self):
         """完全重置状态"""
+        obs = getattr(self, 'reject_observer', None)
+        sym = getattr(self, 'sym_key', None)
         self.__init__(signal_types=self.signal_types)
+        self.reject_observer = obs
+        self.sym_key = sym
 
     def to_dict(self) -> dict:
         """序列化为dict（用于监控状态持久化）"""
@@ -301,7 +338,94 @@ class SignalDetector:
         # 更新prev
         self._prev_close = close
         self._prev_ema10 = ema10
+
+        # ---- 可观察字段更新（仅副作用，不影响返回值） ----
+        self.last_ema_snapshot = {
+            'ema10': ema10, 'ema20': ema20, 'ema120': ema120, 'close': close,
+        }
+        if self.below_ma_start == -1:
+            self.pullback_stage = 'normal'
+            self.pullback_bar_count = 0
+            self.last_pullback_extreme = None
+        else:
+            self.pullback_stage = 'pulling_back'
+            self.pullback_bar_count = self._bar_index - self.below_ma_start
+            self.last_pullback_extreme = (
+                self.pullback_low if self.trend_dir == 1 else self.pullback_high
+            )
+
         return signal
+
+    def peek_candidate(self, current_close: float) -> Optional[dict]:
+        """
+        推演：若本 bar 以 current_close 收盘，是否会触发某类信号？
+        纯推演，不修改任何状态；候选池用。
+
+        返回 dict:
+          {'kind': 'A_long'/'BC_long'/'A_short'/'BC_short',
+           'sig_type': 'A'/'B'/'C',
+           'trigger_price': float,      # current_close
+           'pullback_extreme': float,
+           'pullback_bars': int}
+        或 None（当前 bar 不会触发任何信号）。
+
+        调用者注意：由于 SignalDetector 在 process_bar 结束时才更新 _prev_*，
+        本方法假定调用时处于"当前 bar 尚未 close"的推演态，因此 _prev_close
+        和 _prev_ema10 已是上一根 bar 的值。
+        """
+        if self.trend_dir == 0 or self._prev_close is None or self._prev_ema10 is None:
+            return None
+        if self.last_ema_snapshot is None:
+            return None
+        ema10 = self.last_ema_snapshot.get('ema10')
+        if ema10 is None or (isinstance(ema10, float) and math.isnan(ema10)):
+            return None
+
+        close = current_close
+        # 多头推演
+        if self.trend_dir == 1:
+            # A 类候选：未在回调中，prev 在 EMA10 之上，若 close > ema10 即可
+            if self.below_ma_start == -1 and 'A' in self.signal_types:
+                if close > ema10 and self._prev_close > self._prev_ema10:
+                    # 需要影线触碰 — peek 层面只做"距离"暗示，不确认 low<=ema10
+                    return {
+                        'kind': 'A_long', 'sig_type': 'A',
+                        'trigger_price': ema10,
+                        'pullback_extreme': None,
+                        'pullback_bars': 0,
+                    }
+            # B/C 类候选：已在回调中，若 close > ema10 即可
+            if self.below_ma_start != -1:
+                pb_bars = self._bar_index - self.below_ma_start
+                sig_type = 'B' if pb_bars < self.BC_BOUNDARY else 'C'
+                if sig_type in self.signal_types and close > ema10 and pb_bars >= 1:
+                    return {
+                        'kind': 'BC_long', 'sig_type': sig_type,
+                        'trigger_price': ema10,
+                        'pullback_extreme': self.pullback_low,
+                        'pullback_bars': pb_bars,
+                    }
+        # 空头推演
+        elif self.trend_dir == -1:
+            if self.below_ma_start == -1 and 'A' in self.signal_types:
+                if close < ema10 and self._prev_close < self._prev_ema10:
+                    return {
+                        'kind': 'A_short', 'sig_type': 'A',
+                        'trigger_price': ema10,
+                        'pullback_extreme': None,
+                        'pullback_bars': 0,
+                    }
+            if self.below_ma_start != -1:
+                pb_bars = self._bar_index - self.below_ma_start
+                sig_type = 'B' if pb_bars < self.BC_BOUNDARY else 'C'
+                if sig_type in self.signal_types and close < ema10 and pb_bars >= 1:
+                    return {
+                        'kind': 'BC_short', 'sig_type': sig_type,
+                        'trigger_price': ema10,
+                        'pullback_extreme': self.pullback_high,
+                        'pullback_bars': pb_bars,
+                    }
+        return None
 
 
 # ============================================================
@@ -873,6 +997,67 @@ class ExitTracker:
         self.s61_done = True
         return exits
 
+    # ------------------------------------------------------------
+    #  Live 观察 getter（持仓实时 MFE/MAE/R 用）— 不修改任何状态
+    # ------------------------------------------------------------
+
+    def current_r(self, last_price: float,
+                  exit_strategy: str = 'S6') -> Optional[float]:
+        """
+        当前浮动 R 倍数。用对应策略的 stop 算"入场→止损"距离作为 1R 基准。
+
+        参数:
+          last_price: 最新价（tick 或 bar close）
+          exit_strategy: 'S6'/'S5.1'/'S2' 等，用其 stop 字段估 R
+        返回:
+          浮点 R，或 None（stop 未生效时）
+        """
+        stop_attr = {
+            'S1.1': 's11_stop', 'S2': 's2_stop', 'S2.1': 's21_stop',
+            'S3.1': 's31_stop', 'S5.1': 's51_stop', 'S5.2': 's52_stop',
+            'S6': 's6_stop', 'S6.1': 's61_stop',
+        }.get(exit_strategy, 's6_stop')
+        stop = getattr(self, stop_attr, None)
+        if stop is None:
+            return None
+        dist = abs(self.entry_price - stop) or self.tick_size
+        if self.is_long:
+            return (last_price - self.entry_price) / dist
+        else:
+            return (self.entry_price - last_price) / dist
+
+    def mfe_mae(self, high_series: List[float],
+                low_series: List[float],
+                exit_strategy: str = 'S6') -> dict:
+        """
+        基于持仓期 high/low 序列计算 MFE/MAE（单位 R）。
+
+        调用方通常传入入场以来每根 bar 的 high/low 列表。
+        """
+        stop_attr = {
+            'S1.1': 's11_stop', 'S2': 's2_stop', 'S2.1': 's21_stop',
+            'S3.1': 's31_stop', 'S5.1': 's51_stop', 'S5.2': 's52_stop',
+            'S6': 's6_stop', 'S6.1': 's61_stop',
+        }.get(exit_strategy, 's6_stop')
+        stop = getattr(self, stop_attr, None)
+        if stop is None or not high_series or not low_series:
+            return {'mfe_r': None, 'mae_r': None, 'mfe_price': None, 'mae_price': None}
+        dist = abs(self.entry_price - stop) or self.tick_size
+        if self.is_long:
+            mfe_price = max(high_series)
+            mae_price = min(low_series)
+            mfe_r = (mfe_price - self.entry_price) / dist
+            mae_r = (mae_price - self.entry_price) / dist
+        else:
+            mfe_price = min(low_series)
+            mae_price = max(high_series)
+            mfe_r = (self.entry_price - mfe_price) / dist
+            mae_r = (self.entry_price - mae_price) / dist
+        return {
+            'mfe_r': mfe_r, 'mae_r': mae_r,
+            'mfe_price': mfe_price, 'mae_price': mae_price,
+        }
+
     def to_dict(self) -> dict:
         """序列化为dict（用于positions.json持久化）"""
         return {
@@ -1013,6 +1198,14 @@ class Type1SignalDetector:
         # 挂单状态
         self.pending = None  # dict or None
 
+        # ---- 可观察字段（bar 末尾赋值，不影响检测逻辑） ----
+        self.sym_key: Optional[str] = None
+        self.last_factor_snapshot: Optional[dict] = None  # er20/er40/atr/stop_dist_atr 等
+        self.current_trend: int = 0                       # 1=多 -1=空 0=无
+        self.last_candidate_tier: Optional[str] = None    # 最近一次信号的分级
+        self.pending_display: Optional[dict] = None       # 当前挂单的展示快照
+        self.reject_observer: Optional[RejectObserver] = None
+
     def process_bar(self, close: float, high: float, low: float, opn: float,
                     ema10: float, ema60: float, er20: float, er40: float,
                     atr: float, tick_size: float) -> Optional[Type1Signal]:
@@ -1137,6 +1330,37 @@ class Type1SignalDetector:
 
         self._prev_close = close
         self._prev_ema10 = ema10
+
+        # ---- 可观察字段（仅副作用） ----
+        self.current_trend = 1 if close > ema60 else (-1 if close < ema60 else 0)
+        self.last_factor_snapshot = {
+            'er20': er20, 'er40': er40, 'atr': atr,
+            'ema10': ema10, 'ema60': ema60, 'close': close,
+        }
+        if signal is not None:
+            try:
+                tier, _preset = classify_type1_tier(
+                    signal.stop_dist_atr, signal.recent_win_n,
+                    signal.er_40, signal.signal_density,
+                )
+                self.last_candidate_tier = tier
+            except Exception:
+                self.last_candidate_tier = None
+        if self.pending is not None:
+            sig = self.pending['signal']
+            self.pending_display = {
+                'direction': sig.direction,
+                'pending_price': sig.pending_price,
+                'stop_price': sig.stop_price,
+                'bars_left': max(0, self.pending['expiry_bar'] - self._bar_index),
+                'stop_dist_atr': sig.stop_dist_atr,
+                'er_40': sig.er_40,
+                'recent_win_n': sig.recent_win_n,
+                'tier': self.last_candidate_tier,
+            }
+        else:
+            self.pending_display = None
+
         return signal
 
     def check_fill(self, high: float, low: float, opn: float) -> Optional[dict]:
