@@ -32,6 +32,11 @@ document.addEventListener('alpine:init', () => {
     selectedContract: null,   // inspect 结果
     selectedRule: null,
 
+    // Drawer (C4-C5)
+    drawerOpen: true,
+    drawerTab: 'heatmap',     // heatmap|sector|rejects_agg|rules_doc
+    showShortcuts: false,
+
     // 衍生
     get candidates() {
       // 排序优先级：触发中(0) < 即将触发(1-3) < 较远(>3) < 已突破(<0) < 未知(null)
@@ -59,6 +64,42 @@ document.addEventListener('alpine:init', () => {
     },
     get candidateCount() {
       return Object.keys(this.candidatePool).length;
+    },
+    // 热力图按板块分组
+    get heatmapBySector() {
+      const out = {};
+      for (const cell of Object.values(this.symbolHeatmap)) {
+        const sec = cell.sector || '未知';
+        (out[sec] = out[sec] || []).push(cell);
+      }
+      // 每组按 |er20| desc
+      for (const sec in out) {
+        out[sec].sort((a, b) =>
+          Math.abs(b.er20 || 0) - Math.abs(a.er20 || 0));
+      }
+      return out;
+    },
+    // 拒绝流水按 reason 聚合（今日）
+    get rejectAggregate() {
+      const out = {};
+      for (const r of this.rejectStream) {
+        const key = r.reason || 'unknown';
+        out[key] = (out[key] || 0) + 1;
+      }
+      return Object.entries(out)
+        .sort((a, b) => b[1] - a[1])
+        .map(([reason, count]) => ({ reason, count }));
+    },
+    // 板块警告（同向 ≥3）
+    get sectorWarnings() {
+      const warns = [];
+      for (const [sec, slot] of Object.entries(this.sectorExposure)) {
+        const longTotal = (slot.long_count || 0) + (slot.long_candidates || []).length;
+        const shortTotal = (slot.short_count || 0) + (slot.short_candidates || []).length;
+        if (longTotal >= 3) warns.push({ sector: sec, direction: 'long', count: longTotal });
+        if (shortTotal >= 3) warns.push({ sector: sec, direction: 'short', count: shortTotal });
+      }
+      return warns;
     },
   });
 
@@ -191,6 +232,39 @@ document.addEventListener('alpine:init', () => {
     },
     clearInspect() { dash.selectedContract = null; },
   };
+
+  // ------------------------------------------------------------
+  //  C8 全局快捷键
+  // ------------------------------------------------------------
+  document.addEventListener('keydown', (e) => {
+    // 在 input/textarea 内不拦截
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+
+    if (e.key === '/') {
+      e.preventDefault();
+      const input = document.querySelector('input[data-role="inspect"]');
+      if (input) input.focus();
+    } else if (e.key === 'h') {
+      dash.drawerOpen = true;
+      dash.drawerTab = 'heatmap';
+    } else if (e.key === 's') {
+      dash.drawerOpen = true;
+      dash.drawerTab = 'sector';
+    } else if (e.key === 'j') {
+      dash.drawerOpen = true;
+      dash.drawerTab = 'rejects_agg';
+    } else if (e.key === 'r') {
+      dash.drawerOpen = true;
+      dash.drawerTab = 'rules_doc';
+    } else if (e.key === 'd') {
+      dash.drawerOpen = !dash.drawerOpen;
+    } else if (e.key === '?') {
+      dash.showShortcuts = !dash.showShortcuts;
+    } else if (e.key === 'Escape') {
+      dash.showShortcuts = false;
+    }
+  });
 
   // 启动
   loadRulesCatalog();

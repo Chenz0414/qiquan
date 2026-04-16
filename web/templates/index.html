@@ -91,7 +91,8 @@
         <div class="section-title">合约查询</div>
         <div class="search-bar"
              x-data="{ code: '' }">
-          <input type="text" placeholder="rb2510 / SHFE.rb / rb2510-C-3500"
+          <input type="text" placeholder="rb2510 / SHFE.rb / rb2510-C-3500  (按 / 聚焦)"
+                 data-role="inspect"
                  x-model="code"
                  @keyup.enter="dashApi.inspect(code)">
           <button @click="dashApi.inspect(code)">查询</button>
@@ -289,9 +290,197 @@
     </aside>
 
   </div>
+
+  <!-- ========== 底部抽屉（C4-C5） ========== -->
+  <div class="drawer"
+       :class="$store.dash.drawerOpen ? 'open' : 'closed'">
+
+    <div class="drawer-tabs">
+      <button class="drawer-tab"
+              :class="$store.dash.drawerTab==='heatmap' && $store.dash.drawerOpen ? 'active':''"
+              @click="$store.dash.drawerOpen=true; $store.dash.drawerTab='heatmap'">
+        市场热力图 <span class="muted"
+          x-text="'(' + Object.keys($store.dash.symbolHeatmap).length + ')'"></span>
+      </button>
+      <button class="drawer-tab"
+              :class="$store.dash.drawerTab==='sector' && $store.dash.drawerOpen ? 'active':''"
+              @click="$store.dash.drawerOpen=true; $store.dash.drawerTab='sector'">
+        板块暴露
+        <span x-show="$store.dash.sectorWarnings.length > 0"
+              class="tag bad" style="margin-left:4px"
+              x-text="'!' + $store.dash.sectorWarnings.length"></span>
+      </button>
+      <button class="drawer-tab"
+              :class="$store.dash.drawerTab==='rejects_agg' && $store.dash.drawerOpen ? 'active':''"
+              @click="$store.dash.drawerOpen=true; $store.dash.drawerTab='rejects_agg'">
+        拒绝聚合 <span class="muted"
+          x-text="'(' + $store.dash.rejectAggregate.length + ')'"></span>
+      </button>
+      <button class="drawer-tab"
+              :class="$store.dash.drawerTab==='rules_doc' && $store.dash.drawerOpen ? 'active':''"
+              @click="$store.dash.drawerOpen=true; $store.dash.drawerTab='rules_doc'">
+        规则手册
+      </button>
+
+      <button class="drawer-toggle"
+              @click="$store.dash.drawerOpen = !$store.dash.drawerOpen"
+              x-text="$store.dash.drawerOpen ? '收起 ▾' : '展开 ▴'"></button>
+    </div>
+
+    <div class="drawer-body" x-show="$store.dash.drawerOpen">
+
+      <!-- 热力图 -->
+      <template x-if="$store.dash.drawerTab === 'heatmap'">
+        <div>
+          <template x-if="Object.keys($store.dash.symbolHeatmap).length === 0">
+            <div class="empty">暂无热力图数据（引擎启动后每 bar 刷新）</div>
+          </template>
+          <template x-for="(cells, sec) in $store.dash.heatmapBySector" :key="sec">
+            <div class="heat-group">
+              <div class="heat-group-title" x-text="sec + ' · ' + cells.length + ' 个'"></div>
+              <div class="heat-grid">
+                <template x-for="c in cells" :key="c.sym_key">
+                  <div class="heat-cell"
+                       :class="c.trend_dir === 1 ? 'long' :
+                              (c.trend_dir === -1 ? 'short' : 'flat')"
+                       @click="dashApi.inspect(c.sym_key)">
+                    <div class="hc-badges">
+                      <span x-show="c.has_position" class="hc-badge has-pos">持</span>
+                      <span x-show="c.has_candidate" class="hc-badge has-cand">候</span>
+                    </div>
+                    <div class="hc-name" x-text="c.sym_name || c.sym_key"></div>
+                    <div class="hc-metric">
+                      <span>ER <b x-text="fmt.num(c.er20)"></b></span>
+                      <span style="margin-left:6px">偏 <b x-text="fmt.num(c.deviation_atr, 1)"></b></span>
+                    </div>
+                    <div class="hc-metric">
+                      <span>价 <b x-text="fmt.num(c.last_price)"></b></span>
+                    </div>
+                    <canvas width="120" height="20"
+                            x-init="$nextTick(() => charts.heatCell($el.parentElement.querySelector('canvas'), c))"></canvas>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- 板块暴露 -->
+      <template x-if="$store.dash.drawerTab === 'sector'">
+        <div>
+          <template x-if="Object.keys($store.dash.sectorExposure).length === 0">
+            <div class="empty">暂无板块数据</div>
+          </template>
+          <div class="sector-grid">
+            <template x-for="(slot, sec) in $store.dash.sectorExposure" :key="sec">
+              <div class="sector-card"
+                   :class="((slot.long_count+((slot.long_candidates||[]).length)) >= 3 ||
+                           (slot.short_count+((slot.short_candidates||[]).length)) >= 3)
+                           ? 'warn' : ''">
+                <div class="sector-name" x-text="sec"></div>
+                <div class="sector-line">
+                  持仓 <b class="long" x-text="slot.long_count||0"></b>多 /
+                  <b class="short" x-text="slot.short_count||0"></b>空
+                </div>
+                <div class="sector-line">
+                  候选 <b class="long" x-text="(slot.long_candidates||[]).length"></b>多 /
+                  <b class="short" x-text="(slot.short_candidates||[]).length"></b>空
+                </div>
+                <div class="sector-line muted" style="margin-top:4px"
+                     x-text="([...(slot.long_symbols||[]), ...(slot.short_symbols||[]),
+                              ...(slot.long_candidates||[]), ...(slot.short_candidates||[])]
+                              .join(', ')) || '--'"></div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- 拒绝聚合 -->
+      <template x-if="$store.dash.drawerTab === 'rejects_agg'">
+        <div>
+          <template x-if="$store.dash.rejectAggregate.length === 0">
+            <div class="empty">暂无拒绝流水</div>
+          </template>
+          <div class="reject-agg">
+            <template x-for="a in $store.dash.rejectAggregate" :key="a.reason">
+              <div class="reject-agg-item">
+                <span class="reject-agg-reason" x-text="a.reason"></span>
+                <span class="reject-agg-count" x-text="a.count"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- 规则手册 -->
+      <template x-if="$store.dash.drawerTab === 'rules_doc'">
+        <div>
+          <template x-if="!$store.dash.rulesCatalog">
+            <div class="empty">加载中...</div>
+          </template>
+          <template x-if="$store.dash.rulesCatalog">
+            <table class="rule-table">
+              <thead>
+                <tr>
+                  <th>规则</th><th>族</th><th>说明</th><th>出场</th><th>条件</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="(meta, rk) in $store.dash.rulesCatalog.rules" :key="rk">
+                  <tr>
+                    <td><b x-text="meta.label || rk"></b>
+                      <div class="muted" style="font-size:10px" x-text="rk"></div></td>
+                    <td x-text="meta.family || '--'"></td>
+                    <td x-text="meta.description || '--'"></td>
+                    <td><code x-text="meta.exit_strategy || '--'"></code></td>
+                    <td>
+                      <template x-if="meta.conditions">
+                        <div>
+                          <template x-for="c in meta.conditions">
+                            <div style="font-size:10px;color:var(--text2)">
+                              <code x-text="c.key"></code>
+                              <span x-text="c.op"></span>
+                              <code x-text="JSON.stringify(c.value)"></code>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </template>
+        </div>
+      </template>
+
+    </div>
+  </div>
+
+  <!-- ========== 快捷键帮助 (C8) ========== -->
+  <template x-if="$store.dash.showShortcuts">
+    <div>
+      <div class="overlay" @click="$store.dash.showShortcuts = false"></div>
+      <div class="shortcut-help">
+        <h3>键盘快捷键</h3>
+        <div class="row"><span>聚焦合约查询</span><kbd>/</kbd></div>
+        <div class="row"><span>打开热力图</span><kbd>h</kbd></div>
+        <div class="row"><span>打开板块暴露</span><kbd>s</kbd></div>
+        <div class="row"><span>打开拒绝聚合</span><kbd>j</kbd></div>
+        <div class="row"><span>打开规则手册</span><kbd>r</kbd></div>
+        <div class="row"><span>折叠/展开抽屉</span><kbd>d</kbd></div>
+        <div class="row"><span>显示本帮助</span><kbd>?</kbd></div>
+        <div class="row"><span>关闭弹层</span><kbd>Esc</kbd></div>
+      </div>
+    </div>
+  </template>
+
 </div>
 
 <script src="/static/alpine.min.js" defer></script>
+<script src="/static/charts.js"></script>
 <script src="/static/dashboard.js"></script>
 </body>
 </html>

@@ -132,9 +132,72 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .col::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px}
 .col::-webkit-scrollbar-thumb:hover{background:var(--border2)}
 
+/* ========== 底部抽屉（C4-C5） ========== */
+.app{grid-template-rows:auto 1fr auto}
+.drawer{background:var(--bg2);border-top:1px solid var(--border);display:flex;flex-direction:column;transition:max-height .2s ease}
+.drawer.closed{max-height:32px}
+.drawer.open{max-height:340px}
+
+.drawer-tabs{display:flex;align-items:center;gap:2px;padding:4px 8px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;flex-shrink:0}
+.drawer-tab{background:transparent;color:var(--text2);border:none;padding:4px 10px;font-size:12px;cursor:pointer;border-radius:3px;white-space:nowrap}
+.drawer-tab:hover{background:var(--bg4);color:var(--text)}
+.drawer-tab.active{background:var(--bg);color:var(--blue);font-weight:600}
+.drawer-toggle{margin-left:auto;background:var(--bg);color:var(--text2);border:1px solid var(--border);padding:2px 10px;font-size:11px;cursor:pointer;border-radius:3px}
+.drawer-body{flex:1;overflow:auto;padding:10px 12px}
+
+/* 热力图网格 */
+.heat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
+.heat-cell{background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;cursor:pointer;position:relative;min-height:60px}
+.heat-cell:hover{border-color:var(--border2)}
+.heat-cell.long{border-left:3px solid var(--loss)}
+.heat-cell.short{border-left:3px solid var(--profit)}
+.heat-cell.flat{border-left:3px solid var(--text3)}
+.heat-cell .hc-name{font-weight:600;font-size:12px;margin-bottom:2px}
+.heat-cell .hc-metric{font-size:10px;color:var(--text2)}
+.heat-cell .hc-metric b{color:var(--text)}
+.heat-cell canvas{display:block;margin-top:2px}
+.heat-cell .hc-badges{position:absolute;top:4px;right:4px;display:flex;gap:2px}
+.heat-cell .hc-badge{font-size:9px;padding:0 3px;border-radius:2px;background:var(--bg4)}
+.heat-cell .hc-badge.has-pos{background:var(--blue);color:#fff}
+.heat-cell .hc-badge.has-cand{background:var(--warn);color:#000}
+
+.heat-group{margin-bottom:12px}
+.heat-group-title{font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:4px;padding-bottom:2px;border-bottom:1px dotted var(--border)}
+
+/* 拒绝聚合 */
+.reject-agg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}
+.reject-agg-item{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:6px 10px;display:flex;justify-content:space-between;align-items:center}
+.reject-agg-reason{font-size:11px;color:var(--text)}
+.reject-agg-count{font-size:14px;font-weight:700;color:var(--warn)}
+
+/* 规则手册表 */
+.rule-table{width:100%;border-collapse:collapse;font-size:12px}
+.rule-table th{text-align:left;padding:6px 8px;background:var(--bg3);color:var(--text2);font-weight:500;font-size:11px;border-bottom:1px solid var(--border)}
+.rule-table td{padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top}
+.rule-table tr:hover td{background:var(--bg3)}
+.rule-table code{background:var(--bg);padding:1px 4px;border-radius:2px;font-size:10px;color:var(--cyan)}
+
+/* 板块聚合 */
+.sector-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px}
+.sector-card{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px}
+.sector-card.warn{border-color:var(--warn)}
+.sector-name{font-weight:600;margin-bottom:4px;font-size:13px}
+.sector-line{font-size:11px;color:var(--text2);margin-bottom:1px}
+.sector-line b.long{color:var(--loss)}
+.sector-line b.short{color:var(--profit)}
+
+/* 快捷键帮助 */
+.shortcut-help{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--bg2);border:1px solid var(--border2);border-radius:8px;padding:20px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:200;max-width:400px}
+.shortcut-help h3{font-size:14px;margin-bottom:10px}
+.shortcut-help .row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:var(--text2)}
+.shortcut-help kbd{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:1px 6px;font-family:monospace;font-size:11px;color:var(--text)}
+
+.overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:150}
+
 /* ========== 小屏降级 ========== */
 @media(max-width:1100px){
   .main{grid-template-columns:1fr}
   .col{border-right:none;border-bottom:1px solid var(--border)}
   .col:last-child{border-left:none}
+  .drawer.open{max-height:260px}
 }
