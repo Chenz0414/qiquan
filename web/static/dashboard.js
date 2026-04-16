@@ -32,6 +32,10 @@ document.addEventListener('alpine:init', () => {
     selectedContract: null,   // inspect 结果
     selectedRule: null,
 
+    // D4 一键操作状态
+    pausedRules: {},
+    silencedSymbols: {},
+
     // Drawer (C4-C5)
     drawerOpen: true,
     drawerTab: 'heatmap',     // heatmap|sector|rejects_agg|rules_doc
@@ -231,7 +235,74 @@ document.addEventListener('alpine:init', () => {
       }
     },
     clearInspect() { dash.selectedContract = null; },
+    // ---- D4 一键操作 ----
+    async _post(url, body) {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(url + ' ' + r.status);
+      return r.json();
+    },
+    async silence(symKey) {
+      const mins = prompt('静音 ' + symKey + ' 多少分钟？(0=取消)', '30');
+      if (mins === null) return;
+      const n = parseInt(mins, 10);
+      if (isNaN(n)) return;
+      const reason = n > 0 ? (prompt('静音原因?', '') || '') : '';
+      const res = await this._post('/api/actions/silence',
+        { sym_key: symKey, minutes: n, reason });
+      console.log('[silence]', res);
+      await loadActionState();
+    },
+    async pauseRule(ruleKey, currentPaused) {
+      if (currentPaused) {
+        const res = await this._post('/api/actions/pause_rule',
+          { rule_key: ruleKey, until: 'clear', reason: '' });
+        console.log('[unpause]', res);
+      } else {
+        const hrs = prompt('暂停 ' + ruleKey + ' 多少小时？', '24');
+        if (hrs === null) return;
+        const until = new Date(Date.now() + parseFloat(hrs) * 3600 * 1000).toISOString();
+        const reason = prompt('原因?', '') || '';
+        const res = await this._post('/api/actions/pause_rule',
+          { rule_key: ruleKey, until, reason });
+        console.log('[pause]', res);
+      }
+      await loadActionState();
+    },
+    async note(signalId, symKey) {
+      const text = prompt('笔记内容:', '');
+      if (!text) return;
+      const res = await this._post('/api/actions/note',
+        { text, signal_id: signalId, sym_key: symKey });
+      console.log('[note]', res);
+    },
+    async manualClose(signalId, symName) {
+      const price = prompt('手动平仓 ' + symName + ' 的成交价?', '');
+      if (!price) return;
+      const reason = prompt('原因?', 'user') || 'user';
+      try {
+        const res = await this._post('/api/actions/manual_close',
+          { signal_id: signalId, price: parseFloat(price), reason });
+        console.log('[manual_close]', res);
+        await loadSnapshot();
+      } catch(e) {
+        alert('平仓失败: ' + e.message);
+      }
+    },
   };
+
+  async function loadActionState() {
+    try {
+      const r = await fetch('/api/actions/state');
+      if (!r.ok) return;
+      const s = await r.json();
+      dash.pausedRules = s.paused_rules || {};
+      dash.silencedSymbols = s.silenced_symbols || {};
+    } catch(_) {}
+  }
 
   // ------------------------------------------------------------
   //  C8 全局快捷键
@@ -269,6 +340,7 @@ document.addEventListener('alpine:init', () => {
   // 启动
   loadRulesCatalog();
   loadSnapshot();
+  loadActionState();
   connectSSE();
   // 兜底刷新：60s
   setInterval(loadSnapshot, 60000);

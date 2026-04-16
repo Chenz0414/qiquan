@@ -15,11 +15,14 @@ Phase A4 扩展：
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import Optional
 
 from rules_catalog import RULES, GLOBAL_FILTERS, REJECT_STAGES, REJECT_REASONS
+from web.sandbox_service import submit_job, get_job, list_jobs
 
 
 # ============================================================
@@ -31,6 +34,44 @@ RULE_KEY_TO_SCENARIO = {
     "scenario_2": 2,
     "scenario_3": 3,
 }
+
+
+# ============================================================
+#  D4 一键操作请求体
+# ============================================================
+
+class SilencePayload(BaseModel):
+    sym_key: str
+    minutes: int = 30
+    reason: Optional[str] = None
+
+
+class PausePayload(BaseModel):
+    rule_key: str
+    until: Optional[str] = None   # ISO datetime or "clear"
+    reason: Optional[str] = None
+
+
+class NotePayload(BaseModel):
+    text: str
+    signal_id: Optional[int] = None
+    sym_key: Optional[str] = None
+
+
+class ManualClosePayload(BaseModel):
+    signal_id: int
+    price: float
+    reason: Optional[str] = "user"
+
+
+class SandboxPayload(BaseModel):
+    scenario: Optional[int] = None
+    direction: Optional[str] = None
+    er_min: Optional[float] = None
+    er_max: Optional[float] = None
+    deviation_min: Optional[float] = None
+    deviation_max: Optional[float] = None
+    days: int = 120
 
 
 def _rule_triggers(db, rule_key: str, limit: int = 20,
@@ -363,6 +404,136 @@ def create_router() -> APIRouter:
     @router.get("/api/time")
     async def server_time():
         return {"server_time": datetime.now().isoformat()}
+
+    # ----------------------------------------------------------
+    #  D4 一键操作（§11）
+    # ----------------------------------------------------------
+
+    @router.post("/api/actions/silence")
+    async def action_silence(request: Request, payload: SilencePayload):
+        ds = request.app.state.dashboard
+        db = request.app.state.db
+        if payload.minutes <= 0:
+            ds.set_silence_symbol(payload.sym_key, None)
+            action = "unsilence"
+        else:
+            until = (datetime.now() + timedelta(minutes=payload.minutes)).isoformat()
+            ds.set_silence_symbol(payload.sym_key, until)
+            action = "silence"
+        db.add_note(
+            text=f"{action} {payload.minutes}min: {payload.reason or ''}",
+            sym_key=payload.sym_key, action_type=action)
+        return {"ok": True, "sym_key": payload.sym_key,
+                "silenced_until": ds.silenced_symbols.get(payload.sym_key)}
+
+    @router.post("/api/actions/pause_rule")
+    async def action_pause_rule(request: Request, payload: PausePayload):
+        ds = request.app.state.dashboard
+        db = request.app.state.db
+        if payload.until is None or payload.until.lower() == "clear":
+            ds.set_pause_rule(payload.rule_key, None)
+            action = "unpause_rule"
+            db.add_note(
+                text=f"unpause rule {payload.rule_key}: {payload.reason or ''}",
+                action_type=action)
+        else:
+            ds.set_pause_rule(payload.rule_key, payload.until)
+            action = "pause_rule"
+            db.add_note(
+                text=f"pause rule {payload.rule_key} until {payload.until}: "
+                     f"{payload.reason or ''}",
+                action_type=action)
+        return {"ok": True, "rule_key": payload.rule_key,
+                "paused_until": ds.paused_rules.get(payload.rule_key)}
+
+    @router.post("/api/actions/note")
+    async def action_note(request: Request, payload: NotePayload):
+        db = request.app.state.db
+        note_id = db.add_note(
+            text=payload.text, signal_id=payload.signal_id,
+            sym_key=payload.sym_key, action_type="note")
+        return {"ok": True, "note_id": note_id}
+
+    @router.post("/api/actions/manual_close")
+    async def action_manual_close(request: Request,
+                                   payload: ManualClosePayload):
+        db = request.app.state.db
+        ds = request.app.state.dashboard
+        row = db._conn.execute(
+            "SELECT * FROM signals WHERE id = ?",
+            (payload.signal_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, f"signal {payload.signal_id} not found")
+        sig = dict(row)
+        if sig.get("status") != "open":
+            raise HTTPException(400, f"signal already {sig.get('status')}")
+        entry = float(sig["entry_price"])
+        direction = sig["direction"]
+        pnl_pct = ((payload.price - entry) / entry * 100.0
+                   if direction == "long"
+                   else (entry - payload.price) / entry * 100.0)
+        db.record_exit(
+            signal_id=payload.signal_id,
+            exit_price=payload.price,
+            exit_reason=f"manual:{payload.reason or 'user'}",
+            pnl_pct=pnl_pct,
+            bars_held=sig.get("bars_held") or 0,
+            exit_time=datetime.now().isoformat())
+        db.add_note(
+            text=f"manual_close @{payload.price} reason={payload.reason}",
+            signal_id=payload.signal_id,
+            sym_key=sig.get("sym_key"),
+            action_type="manual_close")
+        # 从 dashboard.active_positions 移除
+        sym_key = sig.get("sym_key")
+        if sym_key:
+            try:
+                ds.remove_position(sym_key)
+            except Exception:
+                pass
+            try:
+                ds.remove_portfolio_live(payload.signal_id)
+            except Exception:
+                pass
+        return {"ok": True, "signal_id": payload.signal_id,
+                "pnl_pct": round(pnl_pct, 4)}
+
+    @router.get("/api/actions/notes")
+    async def action_list_notes(request: Request,
+                                 signal_id: Optional[int] = None,
+                                 limit: int = 50):
+        db = request.app.state.db
+        return {"items": db.get_notes(signal_id=signal_id, limit=limit)}
+
+    @router.get("/api/actions/state")
+    async def action_state(request: Request):
+        ds = request.app.state.dashboard
+        return {
+            "paused_rules": dict(ds.paused_rules),
+            "silenced_symbols": dict(ds.silenced_symbols),
+        }
+
+    # ----------------------------------------------------------
+    #  D3 沙盒回测（§16）
+    # ----------------------------------------------------------
+
+    @router.post("/api/sandbox/run")
+    async def sandbox_run(request: Request, payload: SandboxPayload):
+        db = request.app.state.db
+        cfg = payload.model_dump(exclude_none=False)
+        job_id = submit_job(db, cfg)
+        return {"job_id": job_id, "status": "done"}
+
+    @router.get("/api/sandbox/job/{job_id}")
+    async def sandbox_job(job_id: str):
+        job = get_job(job_id)
+        if job is None:
+            raise HTTPException(404, f"job {job_id} not found")
+        return job
+
+    @router.get("/api/sandbox/jobs")
+    async def sandbox_jobs(limit: int = 20):
+        return {"items": list_jobs(limit)}
 
     # ----------------------------------------------------------
     #  SSE（兼容保留）

@@ -110,3 +110,54 @@ python -c "from tqsdk import TqApi, TqAuth; import json; s=json.load(open('.secr
 - `state/monitor_state.json` — 当前监控状态
 - `monitor_settings.json` — 配置
 - `logs/` — 运行日志
+
+## Phase C-D Web 仪表盘部署
+
+### 静态资源
+新版仪表盘所有 JS/CSS 本地化在 `web/static/`：
+- `alpine.min.js` / `charts.js` / `dashboard.js` / `dashboard.css`
+
+FastAPI 已通过 `StaticFiles` 挂载 `/static/*`。旧页面保留在 `/legacy`。
+
+### Nginx SSE 配置
+如使用 nginx 反向代理，**必须**关闭缓冲，否则事件流会被卡住：
+
+```nginx
+location /api/events {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_buffering off;            # ← 关键
+    proxy_cache off;
+    proxy_read_timeout 24h;
+    proxy_set_header Connection '';
+    chunked_transfer_encoding off;
+}
+```
+
+### D1-D2 定时任务
+每日收盘后计算规则统计 + 生成日报并推送 PushPlus：
+
+```bash
+crontab -e
+# 日盘 15:15 生成日报并推送
+15 15 * * 1-5 cd /home/ubuntu/qiquan && /home/ubuntu/qiquan/venv/bin/python -m scripts.generate_daily_report --push --db state/signals.db >> logs/daily_report.log 2>&1
+# 夜盘完 16:30 计算规则统计 + 漂移
+30 16 * * 1-5 cd /home/ubuntu/qiquan && /home/ubuntu/qiquan/venv/bin/python -m scripts.compute_daily_rule_stats --db state/signals.db >> logs/rule_stats.log 2>&1
+```
+
+### D4 一键操作端点
+- `POST /api/actions/silence` `{sym_key, minutes, reason}` — 静音品种
+- `POST /api/actions/pause_rule` `{rule_key, until|"clear", reason}` — 暂停规则
+- `POST /api/actions/note` `{text, signal_id?, sym_key?}` — 添加笔记
+- `POST /api/actions/manual_close` `{signal_id, price, reason}` — 手动平仓
+- `GET /api/actions/notes?signal_id=&limit=` — 查笔记
+- `GET /api/actions/state` — 当前静音/暂停快照
+
+### D3 沙盒回测端点
+- `POST /api/sandbox/run` `{scenario?, er_min?, deviation_min?, days}` — 提交沙盒
+- `GET /api/sandbox/job/:id` — 查询结果
+- `GET /api/sandbox/jobs?limit=` — 历史列表
+
+### Web 配置
+启动 FastAPI 作为 systemd 服务（参考 `deploy/nginx.conf`）。
+开发模式在本地用：`python -m web.dev_server` (端口 8765，带假数据)。

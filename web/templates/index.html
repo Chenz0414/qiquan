@@ -62,6 +62,13 @@
                           :class="$store.dash.driftState[rk].severity"
                           x-text="$store.dash.driftState[rk].severity || ''"></span>
                   </template>
+                  <button class="btn-pause"
+                          :class="$store.dash.pausedRules[rk] ? 'paused' : ''"
+                          :title="$store.dash.pausedRules[rk]
+                                  ? '已暂停至 ' + $store.dash.pausedRules[rk] + ' (点击解除)'
+                                  : '暂停此规则'"
+                          @click.stop="dashApi.pauseRule(rk, !!$store.dash.pausedRules[rk])"
+                          x-text="$store.dash.pausedRules[rk] ? '▶' : '⏸'"></button>
                 </div>
                 <div class="rule-count">
                   <template x-if="$store.dash.ruleTodayCounters[rk]">
@@ -227,6 +234,17 @@
               <span>MAE <span class="strong"
                     x-text="fmt.r($store.dash.portfolioLive[p.signal_id]?.mae_r)"></span></span>
             </div>
+            <div class="pos-actions">
+              <button class="btn-mini" title="静音 30min"
+                      @click="dashApi.silence(p.sym_key)">🔕</button>
+              <button class="btn-mini" title="添加笔记"
+                      @click="dashApi.note(p.signal_id, p.sym_key)">📝</button>
+              <button class="btn-mini btn-danger" title="标记手动平仓"
+                      @click="dashApi.manualClose(p.signal_id, p.sym_name || p.sym_key)">✋</button>
+              <span class="silence-badge"
+                    x-show="$store.dash.silencedSymbols[p.sym_key]"
+                    x-text="'🔕 至 ' + fmt.time($store.dash.silencedSymbols[p.sym_key])"></span>
+            </div>
           </div>
         </template>
       </div>
@@ -320,6 +338,11 @@
               :class="$store.dash.drawerTab==='rules_doc' && $store.dash.drawerOpen ? 'active':''"
               @click="$store.dash.drawerOpen=true; $store.dash.drawerTab='rules_doc'">
         规则手册
+      </button>
+      <button class="drawer-tab"
+              :class="$store.dash.drawerTab==='sandbox' && $store.dash.drawerOpen ? 'active':''"
+              @click="$store.dash.drawerOpen=true; $store.dash.drawerTab='sandbox'">
+        沙盒回测
       </button>
 
       <button class="drawer-toggle"
@@ -452,6 +475,75 @@
                 </template>
               </tbody>
             </table>
+          </template>
+        </div>
+      </template>
+
+      <!-- 沙盒回测 -->
+      <template x-if="$store.dash.drawerTab === 'sandbox'">
+        <div x-data="{
+              cfg: { scenario: 1, er_min: null, deviation_min: null, days: 120 },
+              running: false, result: null,
+              async run() {
+                this.running = true; this.result = null;
+                try {
+                  const r = await fetch('/api/sandbox/run', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(this.cfg)
+                  });
+                  const data = await r.json();
+                  const job = await fetch('/api/sandbox/job/'+data.job_id).then(x=>x.json());
+                  this.result = job.result;
+                } catch(e) { this.result = { error: String(e) }; }
+                this.running = false;
+              }
+           }">
+          <div class="sandbox-form">
+            <label>场景 <select x-model.number="cfg.scenario">
+              <option value="">全部</option>
+              <option :value="1">场景1</option>
+              <option :value="2">场景2</option>
+              <option :value="3">场景3</option>
+            </select></label>
+            <label>ER ≥ <input type="number" step="0.05" x-model.number="cfg.er_min" placeholder="0.5"></label>
+            <label>偏离 ≥ <input type="number" step="0.1" x-model.number="cfg.deviation_min" placeholder="1.0"></label>
+            <label>回看天数 <input type="number" x-model.number="cfg.days" style="width:60px"></label>
+            <button @click="run()" :disabled="running"
+                    x-text="running ? '计算中...' : '运行沙盒'"></button>
+          </div>
+          <template x-if="result && result.error">
+            <div class="empty" x-text="'错误: ' + result.error"></div>
+          </template>
+          <template x-if="result && result.baseline">
+            <div class="sandbox-result">
+              <table class="rule-table">
+                <thead><tr><th></th><th>命中</th><th>胜率</th><th>avg R</th><th>avg %</th><th>MFE p50</th></tr></thead>
+                <tbody>
+                  <tr><td>基线</td>
+                    <td x-text="result.baseline.hits"></td>
+                    <td x-text="fmt.pct((result.baseline.win_rate||0)*100, 0)"></td>
+                    <td x-text="fmt.r(result.baseline.avg_r)"></td>
+                    <td x-text="fmt.pct(result.baseline.avg_pnl_pct)"></td>
+                    <td x-text="fmt.r(result.baseline.mfe_p50)"></td>
+                  </tr>
+                  <tr><td>沙盒</td>
+                    <td x-text="result.sandbox.hits"></td>
+                    <td x-text="fmt.pct((result.sandbox.win_rate||0)*100, 0)"></td>
+                    <td x-text="fmt.r(result.sandbox.avg_r)"></td>
+                    <td x-text="fmt.pct(result.sandbox.avg_pnl_pct)"></td>
+                    <td x-text="fmt.r(result.sandbox.mfe_p50)"></td>
+                  </tr>
+                  <tr style="color:var(--blue)"><td>Δ</td>
+                    <td x-text="(result.delta.hits>=0?'+':'') + result.delta.hits"></td>
+                    <td x-text="result.delta.win_rate!=null ? fmt.pct(result.delta.win_rate*100, 1) : '--'"></td>
+                    <td x-text="fmt.r(result.delta.avg_r)"></td>
+                    <td>--</td>
+                    <td x-text="fmt.r(result.delta.mfe_p50)"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </template>
         </div>
       </template>

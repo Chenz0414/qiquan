@@ -336,6 +336,22 @@ class SignalDB:
               stats.get("avg_r"), stats.get("mfe_p50"), stats.get("mfe_p90")))
         self._conn.commit()
 
+    def upsert_rule_stats(self, date: str, rule_key: str,
+                          window_days: int, hit_count: int,
+                          open_count: int, win_count: int,
+                          avg_pnl_pct: float = None,
+                          avg_r: float = None,
+                          mfe_p50: float = None,
+                          mfe_p90: float = None):
+        self._conn.execute("""
+            INSERT OR REPLACE INTO daily_rule_stats
+              (date, rule_key, window_days, hit_count, open_count,
+               win_count, avg_pnl_pct, avg_r, mfe_p50, mfe_p90)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (date, rule_key, window_days, hit_count, open_count,
+              win_count, avg_pnl_pct, avg_r, mfe_p50, mfe_p90))
+        self._conn.commit()
+
     def get_rule_stats(self, rule_key: str, window_days: int = 120,
                        date: str = None) -> dict:
         if date is None:
