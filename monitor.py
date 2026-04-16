@@ -25,6 +25,13 @@ from monitor_config import MonitorConfig
 from notifier import PushPlusNotifier
 from state_manager import StateManager
 from contract_parser import get_sym_meta
+try:
+    from web.correlation_service import (
+        compute_sector_exposure, detect_sector_warnings,
+    )
+    _HAS_CORRELATION = True
+except Exception:
+    _HAS_CORRELATION = False
 
 
 # 出场策略 → ExitTracker 止损属性名
@@ -312,8 +319,24 @@ class MonitorEngine:
                 trends = {k: d.trend_dir for k, d in self.detectors.items()}
                 self.dashboard_state.update_trends(trends)
 
-            # 定时保存状态
+            # 板块集中度聚合（10s 节流）
             now = time.time()
+            if (self.dashboard_state and _HAS_CORRELATION and self.signal_db
+                    and (now - getattr(self, '_last_sector_calc', 0)) > 10):
+                try:
+                    open_sigs = self.signal_db.get_open_signals()
+                    exposure = compute_sector_exposure(
+                        open_sigs, self.dashboard_state.candidate_pool
+                    )
+                    warnings = detect_sector_warnings(exposure)
+                    self.dashboard_state.update_sector_exposure(
+                        exposure, warnings=warnings
+                    )
+                except Exception as e:
+                    logger.warning(f"sector_exposure 计算失败: {e}")
+                self._last_sector_calc = now
+
+            # 定时保存状态
             if now - self._last_save > self._save_interval:
                 self._save_state()
                 self._last_save = now

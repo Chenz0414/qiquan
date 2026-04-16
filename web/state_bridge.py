@@ -9,6 +9,7 @@ import asyncio
 import threading
 import json
 import logging
+import time
 from datetime import datetime
 from collections import deque
 
@@ -72,6 +73,12 @@ class DashboardState:
         # 规则漂移告警（当前最严重级别）
         self.drift_state: dict = {}          # rule_key -> {severity, z_score, ...}
 
+        # ================================================================
+        #  Phase B5 新增：事件去重 + 节流
+        # ================================================================
+        # key -> 最近一次事件 unix ts（秒）
+        self._event_last_push: dict = {}
+
     # ================================================================
     #  引擎调用（主线程，加锁写入）
     # ================================================================
@@ -113,13 +120,28 @@ class DashboardState:
                 except asyncio.QueueFull:
                     pass  # 慢客户端丢弃旧事件
 
+    def _should_emit(self, key: str, min_interval_sec: float) -> bool:
+        """节流判断：同 key 距上次 emit ≥ min_interval_sec 才返回 True。
+
+        调用前必须持有 self._lock（内部读写 _event_last_push）。
+        """
+        now = time.time()
+        last = self._event_last_push.get(key)
+        if last is not None and (now - last) < min_interval_sec:
+            return False
+        self._event_last_push[key] = now
+        return True
+
     # ================================================================
     #  Phase A3 新增写入器（引擎主线程调用）
     # ================================================================
 
     def push_reject(self, sym_key: str, stage: str, reason: str,
                     context: dict = None):
-        """拒绝流水入队 + SSE 广播"""
+        """拒绝流水入队 + SSE 广播（同键 30s 去重）。
+
+        DB/deque 每次都写入；SSE 事件 30s 去重避免前端刷爆。
+        """
         entry = {
             "sym_key": sym_key, "stage": stage, "reason": reason,
             "context": context or {},
@@ -127,8 +149,11 @@ class DashboardState:
         }
         with self._lock:
             self.reject_stream.append(entry)
-        # 降级：SSE 事件走推送通道
-        self.push_event("reject", entry)
+            emit_sse = self._should_emit(
+                f"reject::{sym_key}::{stage}::{reason}", 30.0
+            )
+        if emit_sse:
+            self.push_event("reject", entry)
 
     def update_symbol_state(self, sym_key: str, patch: dict):
         with self._lock:
@@ -143,28 +168,60 @@ class DashboardState:
             counters[field] = counters.get(field, 0) + delta
 
     def set_candidate(self, sym_key: str, candidate: dict = None):
-        """candidate=None 则移除"""
+        """candidate=None 则移除；SSE 每 sym 200ms 节流。"""
         with self._lock:
             if candidate is None:
-                self.candidate_pool.pop(sym_key, None)
+                existed = self.candidate_pool.pop(sym_key, None) is not None
+                if not existed:
+                    return  # 没变动不推
+                emit_sse = True  # removes 不做节流
+                payload = {"upserts": [], "removes": [sym_key]}
             else:
                 self.candidate_pool[sym_key] = candidate
+                emit_sse = self._should_emit(
+                    f"candidate::{sym_key}", 0.2
+                )
+                payload = {"upserts": [candidate], "removes": []}
+        if emit_sse:
+            self.push_event("candidate_update", payload)
 
     def update_heatmap_cell(self, sym_key: str, cell: dict):
+        """每 bar 级刷新，不节流（bar 间隔够长）。"""
         with self._lock:
             self.symbol_heatmap[sym_key] = cell
+        self.push_event("heatmap_delta", {"cells": [cell]})
 
     def update_portfolio_live(self, signal_id, live: dict):
+        """持仓实时数据，每 signal 1s 节流。"""
+        sid = str(signal_id)
         with self._lock:
-            self.portfolio_live[str(signal_id)] = live
+            self.portfolio_live[sid] = live
+            emit_sse = self._should_emit(f"portfolio::{sid}", 1.0)
+        if emit_sse:
+            self.push_event("position_live", {"signal_id": sid, "live": live})
 
     def remove_portfolio_live(self, signal_id):
+        sid = str(signal_id)
         with self._lock:
-            self.portfolio_live.pop(str(signal_id), None)
+            existed = self.portfolio_live.pop(sid, None) is not None
+            self._event_last_push.pop(f"portfolio::{sid}", None)
+        if existed:
+            self.push_event("position_live", {
+                "signal_id": sid, "live": None, "removed": True
+            })
 
-    def update_sector_exposure(self, exposure: dict):
+    def update_sector_exposure(self, exposure: dict,
+                               warnings: list = None):
+        """更新板块暴露快照；若提供 warnings，对新增项发 sector_warning。"""
+        new_alerts = []
         with self._lock:
             self.sector_exposure = dict(exposure)
+            for w in (warnings or []):
+                key = f"sector::{w.get('sector')}::{w.get('direction')}"
+                if self._should_emit(key, 60.0):
+                    new_alerts.append(w)
+        for w in new_alerts:
+            self.push_event("sector_warning", w)
 
     def update_option_quotes(self, quotes_patch: dict):
         with self._lock:
@@ -189,9 +246,22 @@ class DashboardState:
                 self.silenced_symbols[sym_key] = until_iso
 
     def update_drift_state(self, drift_patch: dict):
-        """drift_patch: {rule_key -> {severity, z_score, ...}}"""
+        """drift_patch: {rule_key -> {severity, z_score, ...}}
+
+        severity 上升（normal→warn / warn→alert / normal→alert）时发 drift_alert。
+        """
+        _SEV_RANK = {"normal": 0, "warn": 1, "alert": 2}
+        alerts = []
         with self._lock:
-            self.drift_state.update(drift_patch)
+            for rk, new_val in (drift_patch or {}).items():
+                old_val = self.drift_state.get(rk) or {}
+                old_sev = _SEV_RANK.get(old_val.get("severity"), 0)
+                new_sev = _SEV_RANK.get(new_val.get("severity"), 0)
+                self.drift_state[rk] = new_val
+                if new_sev > old_sev:
+                    alerts.append({"rule_key": rk, **new_val})
+        for a in alerts:
+            self.push_event("drift_alert", a)
 
     # ================================================================
     #  Web调用（FastAPI线程）
