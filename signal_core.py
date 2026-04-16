@@ -208,6 +208,15 @@ class SignalDetector:
         det._prev_close = d['_prev_close']
         det._prev_ema10 = d['_prev_ema10']
         det._bar_index = d['_bar_index']
+        # Phase A1 可观察字段默认值（旧状态文件不含）
+        det.sym_key = None
+        det.last_ema_snapshot = None
+        det.pullback_stage = 'normal'
+        det.pullback_bar_count = 0
+        det.last_pullback_extreme = None
+        det.candidate_scenario = None
+        det.last_reject_reasons = []
+        det.reject_observer = None
         return det
 
     def process_bar(self, close: float, high: float, low: float,
