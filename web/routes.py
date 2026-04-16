@@ -196,6 +196,11 @@ def create_router() -> APIRouter:
         return request.app.state.templates.TemplateResponse(
             request=request, name="index.html")
 
+    @router.get("/legacy")
+    async def index_legacy(request: Request):
+        return request.app.state.templates.TemplateResponse(
+            request=request, name="index_legacy.html")
+
     @router.get("/api/snapshot")
     async def snapshot(request: Request):
         dashboard = request.app.state.dashboard

@@ -2,319 +2,296 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>期货信号监控</title>
-<style>
-:root {
-  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
-  --text: #c9d1d9; --text2: #8b949e; --border: #30363d;
-  --profit: #3fb950; --loss: #f85149; --warn: #d29922;
-  --blue: #58a6ff; --purple: #bc8cff;
-}
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-serif; font-size:14px; }
-
-/* 顶部状态栏 */
-.header { background:var(--bg2); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; position:sticky; top:0; z-index:10; }
-.header h1 { font-size:18px; font-weight:600; }
-.status-dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
-.status-dot.on { background:var(--profit); box-shadow:0 0 6px var(--profit); }
-.status-dot.off { background:var(--loss); box-shadow:0 0 6px var(--loss); }
-.badge { background:var(--bg3); border:1px solid var(--border); border-radius:12px; padding:2px 10px; font-size:12px; }
-.badge.profit { border-color:var(--profit); color:var(--profit); }
-.badge.loss { border-color:var(--loss); color:var(--loss); }
-
-.container { max-width:1200px; margin:0 auto; padding:16px; }
-.section-title { font-size:16px; font-weight:600; margin:20px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
-
-/* 持仓表格 */
-.pos-table { width:100%; border-collapse:collapse; }
-.pos-table th { text-align:left; padding:8px 12px; background:var(--bg3); color:var(--text2); font-size:12px; font-weight:500; }
-.pos-table td { padding:8px 12px; border-bottom:1px solid var(--border); }
-.pos-table tr.profit-row { background:rgba(63,185,80,0.08); }
-.pos-table tr.loss-row { background:rgba(248,81,73,0.08); }
-.dir-long { color:var(--loss); font-weight:600; }
-.dir-short { color:var(--profit); font-weight:600; }
-.empty-msg { text-align:center; padding:24px; color:var(--text2); }
-
-/* 信号卡片 */
-.cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:12px; }
-.card { background:var(--bg2); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-.card-header { padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
-.card-header .title { font-weight:600; font-size:15px; }
-.card-header .tags { display:flex; gap:6px; }
-.card-header .tag { font-size:11px; padding:1px 8px; border-radius:10px; background:var(--bg3); border:1px solid var(--border); }
-.card-header .tag.s1 { border-color:var(--blue); color:var(--blue); }
-.card-header .tag.s2 { border-color:var(--purple); color:var(--purple); }
-.card-header .tag.s3 { border-color:var(--warn); color:var(--warn); }
-.tag[title] { cursor:help; position:relative; }
-.tag[title]:hover::after { content:attr(title); position:absolute; top:100%; left:50%; transform:translateX(-50%); margin-top:6px; background:#1c2128; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:12px; white-space:pre-line; width:220px; z-index:100; line-height:1.5; box-shadow:0 4px 12px rgba(0,0,0,0.4); pointer-events:none; }
-.tag[title]:hover { z-index:101; }
-.card-status { padding:4px 16px 8px; font-size:13px; }
-.card-status .open { color:var(--warn); }
-.card-status .win { color:var(--profit); }
-.card-status .lose { color:var(--loss); }
-.card-info { padding:8px 16px; font-size:13px; color:var(--text2); display:grid; grid-template-columns:1fr 1fr; gap:4px; }
-.card-info span { white-space:nowrap; }
-
-/* 时间线 */
-.timeline { padding:8px 16px 12px; }
-.tl-item { display:flex; gap:8px; padding:3px 0; font-size:12px; color:var(--text2); }
-.tl-dot { width:8px; height:8px; border-radius:50%; border:2px solid var(--border); margin-top:3px; flex-shrink:0; }
-.tl-dot.entry { background:var(--blue); border-color:var(--blue); }
-.tl-dot.stop { background:var(--warn); border-color:var(--warn); }
-.tl-dot.exit { background:var(--profit); border-color:var(--profit); }
-.tl-dot.exit-loss { background:var(--loss); border-color:var(--loss); }
-
-/* 市场概览 */
-.market-grid { display:flex; flex-wrap:wrap; gap:6px; }
-.market-chip { font-size:11px; padding:3px 8px; border-radius:4px; background:var(--bg3); border:1px solid var(--border); }
-.market-chip.long { border-color:var(--loss); color:var(--loss); }
-.market-chip.short { border-color:var(--profit); color:var(--profit); }
-.market-chip.flat { color:var(--text2); }
-
-@media(max-width:768px) {
-  .cards { grid-template-columns:1fr; }
-  .header { padding:8px 12px; }
-  .container { padding:8px; }
-}
-</style>
+<link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
 
-<div class="header">
-  <h1>期货信号监控</h1>
-  <span><span class="status-dot off" id="statusDot"></span> <span id="statusText">连接中...</span></span>
-  <span class="badge" id="lastUpdate">--</span>
-  <span class="badge" id="posCount">持仓 0</span>
-  <span class="badge" id="todayCount">今日 0 信号</span>
-</div>
+<div class="app" x-data>
 
-<div class="container">
+  <!-- ========== 顶部状态栏 ========== -->
+  <header class="header">
+    <h1>期货信号监控</h1>
+    <span class="stat">
+      <span class="status-dot"
+            :class="$store.dash.engineStatus === 'running' ? 'on' :
+                   ($store.dash.engineStatus === 'reconnecting' ? 'warn' : 'off')"></span>
+      <b x-text="$store.dash.engineStatus || '未知'"></b>
+    </span>
+    <span class="stat">SSE:
+      <b x-text="$store.dash.connected ? '已连接' : '断开'"
+         :class="$store.dash.connected ? 'pos' : 'neg'"></b>
+    </span>
+    <span class="stat">持仓 <b x-text="$store.dash.openPositionCount"></b></span>
+    <span class="stat">候选 <b x-text="$store.dash.candidateCount"></b></span>
+    <span class="stat">拒绝(近) <b x-text="$store.dash.rejectStream.length"></b></span>
+    <span class="spacer"></span>
+    <span class="stat muted" x-text="'上次刷新 ' + fmt.time($store.dash.lastUpdate)"></span>
+    <a href="/legacy" class="stat muted" style="text-decoration:underline;font-size:11px">legacy</a>
+  </header>
 
-  <div class="section-title">活跃持仓</div>
-  <table class="pos-table">
-    <thead>
-      <tr><th>品种</th><th>方向</th><th>入场价</th><th>当前止损</th><th>策略</th><th>持仓根数</th></tr>
-    </thead>
-    <tbody id="posBody">
-      <tr><td colspan="6" class="empty-msg">暂无活跃持仓</td></tr>
-    </tbody>
-  </table>
+  <!-- ========== 三栏 + 底部抽屉 ========== -->
+  <div class="main">
 
-  <div class="section-title">信号记录</div>
-  <div class="cards" id="cardsContainer"></div>
+    <!-- =========== 左栏：规则树 =========== -->
+    <aside class="col col-left">
 
-  <div class="section-title" style="cursor:pointer" onclick="document.getElementById('marketSection').style.display=document.getElementById('marketSection').style.display==='none'?'block':'none'">
-    市场概览 ▾
-  </div>
-  <div id="marketSection">
-    <div class="market-grid" id="marketGrid"></div>
-  </div>
+      <div class="section">
+        <div class="section-title">
+          <span>规则</span>
+          <span class="count" x-text="$store.dash.rulesCatalog
+              ? Object.keys($store.dash.rulesCatalog.rules || {}).length + ' 条'
+              : '--'"></span>
+        </div>
 
-</div>
+        <template x-if="!$store.dash.rulesCatalog">
+          <div class="empty">加载规则目录...</div>
+        </template>
 
-<script>
-// ============ 工具函数 ============
-const DIR_LABEL = {long:'多', short:'空'};
-const DIR_VERB = {long:'做多', short:'做空'};
-const DIR_CLASS = {long:'dir-long', short:'dir-short'};
-const SCENE_TIP = {
-  1: '偏离≤1ATR\nER≥0.5\n趋势回调入场\n出场: S2',
-  2: '1ATR<偏离≤3ATR\nER≥0.5\n偏离较大\n出场: S2',
-  3: '偏离>3ATR 或 ER<0.5\n极端偏离/弱趋势\n出场: S5.1(S3.1兜底+S2接管)',
-};
-
-function fmtTime(iso) {
-  if (!iso) return '--';
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-}
-function fmtDate(iso) {
-  if (!iso) return '--';
-  return iso.slice(0, 16).replace('T', ' ');
-}
-
-// ============ 持仓表 ============
-function renderPositions(positions) {
-  const tbody = document.getElementById('posBody');
-  const keys = Object.keys(positions);
-  document.getElementById('posCount').textContent = `持仓 ${keys.length}`;
-  if (keys.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">暂无活跃持仓</td></tr>';
-    return;
-  }
-  tbody.innerHTML = keys.map(sym => {
-    const p = positions[sym];
-    const dirCls = DIR_CLASS[p.direction] || '';
-    const dirText = DIR_LABEL[p.direction] || p.direction;
-    return `<tr>
-      <td><b>${p.sym_name||sym}</b></td>
-      <td class="${dirCls}">${dirText}</td>
-      <td>${p.entry_price}</td>
-      <td>${p.current_stop || '--'}</td>
-      <td>${p.exit_strategy} ${p.mode ? '['+p.mode+']' : ''}</td>
-      <td>${p.bars_held || '--'}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ============ 信号卡片 ============
-function renderCard(sig) {
-  const dir = DIR_VERB[sig.direction] || sig.direction;
-  const pb = sig.pullback_bars > 0 ? `${sig.signal_type}${sig.pullback_bars}根` : sig.signal_type;
-  const sceneCls = sig.scenario === 1 ? 's1' : sig.scenario === 2 ? 's2' : 's3';
-
-  let statusHtml;
-  if (sig.status === 'open') {
-    statusHtml = `<span class="open">● 持仓中</span>`;
-  } else {
-    const sign = sig.pnl_pct >= 0 ? '+' : '';
-    const cls = sig.pnl_pct >= 0 ? 'win' : 'lose';
-    statusHtml = `<span class="${cls}">● 已平仓 ${sign}${sig.pnl_pct.toFixed(1)}%</span>`;
-  }
-
-  // 时间线
-  let tlHtml = `<div class="tl-item"><div class="tl-dot entry"></div><span>${fmtTime(sig.entry_time)} 开仓 入${sig.entry_price} 止${sig.initial_stop}</span></div>`;
-  if (sig.stop_history) {
-    sig.stop_history.forEach(h => {
-      tlHtml += `<div class="tl-item"><div class="tl-dot stop"></div><span>${fmtTime(h.time)} 止损 ${h.old}→${h.new}</span></div>`;
-    });
-  }
-  if (sig.status === 'closed') {
-    const dotCls = sig.pnl_pct >= 0 ? 'exit' : 'exit-loss';
-    const sign = sig.pnl_pct >= 0 ? '+' : '';
-    tlHtml += `<div class="tl-item"><div class="tl-dot ${dotCls}"></div><span>${fmtTime(sig.exit_time)} 平仓 ${sig.exit_price} ${sign}${sig.pnl_pct.toFixed(1)}%</span></div>`;
-  }
-
-  return `<div class="card" data-id="${sig.id}">
-    <div class="card-header">
-      <span class="title">${sig.sym_name} ${dir} ${pb}</span>
-      <div class="tags">
-        <span class="tag ${sceneCls}" title="${SCENE_TIP[sig.scenario]||''}">场景${sig.scenario}</span>
-        ${sig.position_multiplier > 1 ? `<span class="tag">${sig.position_multiplier}x</span>` : ''}
+        <template x-if="$store.dash.rulesCatalog">
+          <div class="rule-tree">
+            <template x-for="(meta, rk) in $store.dash.rulesCatalog.rules" :key="rk">
+              <div class="rule-item"
+                   :class="$store.dash.selectedRule === rk ? 'active' : ''"
+                   @click="$store.dash.selectedRule = ($store.dash.selectedRule === rk ? null : rk)">
+                <div class="rule-top">
+                  <span class="rule-label" x-text="meta.label || rk"></span>
+                  <template x-if="$store.dash.driftState[rk]">
+                    <span class="rule-badge"
+                          :class="$store.dash.driftState[rk].severity"
+                          x-text="$store.dash.driftState[rk].severity || ''"></span>
+                  </template>
+                </div>
+                <div class="rule-count">
+                  <template x-if="$store.dash.ruleTodayCounters[rk]">
+                    <span>
+                      <span>今 <b x-text="($store.dash.ruleTodayCounters[rk].hits||0)"></b></span>
+                      <span class="win">胜 <b x-text="($store.dash.ruleTodayCounters[rk].wins||0)"></b></span>
+                      <span class="lose">负 <b x-text="($store.dash.ruleTodayCounters[rk].losses||0)"></b></span>
+                    </span>
+                  </template>
+                  <template x-if="!$store.dash.ruleTodayCounters[rk]">
+                    <span class="muted">今日 0</span>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
       </div>
-    </div>
-    <div class="card-status">${statusHtml}</div>
-    <div class="card-info">
-      <span>入场: ${sig.entry_price}</span><span>止损: ${sig.initial_stop}</span>
-      <span>ER: ${sig.er20 != null ? sig.er20.toFixed(2) : '--'}</span><span>偏离: ${sig.deviation_atr != null ? sig.deviation_atr.toFixed(1) : '--'}ATR</span>
-    </div>
-    <div class="timeline">${tlHtml}</div>
-  </div>`;
-}
 
-function renderCards(signals) {
-  document.getElementById('cardsContainer').innerHTML = signals.map(renderCard).join('');
-}
+    </aside>
 
-// ============ 市场概览 ============
-function renderMarket(trends) {
-  const grid = document.getElementById('marketGrid');
-  if (!trends || Object.keys(trends).length === 0) {
-    grid.innerHTML = '<span class="market-chip flat">等待数据...</span>';
-    return;
-  }
-  grid.innerHTML = Object.entries(trends).map(([sym, dir]) => {
-    const cls = dir === 1 ? 'long' : dir === -1 ? 'short' : 'flat';
-    const arrow = dir === 1 ? '↑' : dir === -1 ? '↓' : '-';
-    const name = sym.split('.')[1] || sym;
-    return `<span class="market-chip ${cls}">${name}${arrow}</span>`;
-  }).join('');
-}
+    <!-- =========== 中栏：候选池 + 合约查询 + 持仓 =========== -->
+    <main class="col col-mid">
 
-// ============ 状态栏 ============
-function updateStatus(snap) {
-  const dot = document.getElementById('statusDot');
-  const text = document.getElementById('statusText');
-  if (snap.engine_status === 'running') {
-    dot.className = 'status-dot on';
-    text.textContent = '运行中';
-  } else if (snap.engine_status === 'reconnecting') {
-    dot.className = 'status-dot off';
-    text.textContent = '重连中...';
-  } else {
-    dot.className = 'status-dot off';
-    text.textContent = snap.engine_status || '未知';
-  }
+      <!-- 合约查询（先放最顶，方便输入） -->
+      <div class="section">
+        <div class="section-title">合约查询</div>
+        <div class="search-bar"
+             x-data="{ code: '' }">
+          <input type="text" placeholder="rb2510 / SHFE.rb / rb2510-C-3500"
+                 x-model="code"
+                 @keyup.enter="dashApi.inspect(code)">
+          <button @click="dashApi.inspect(code)">查询</button>
+          <button @click="dashApi.clearInspect(); code=''"
+                  style="background:var(--bg3)">清除</button>
+        </div>
 
-  // 最后更新时间
-  const times = Object.values(snap.last_bar_time || {});
-  if (times.length > 0) {
-    const latest = times.sort().pop();
-    document.getElementById('lastUpdate').textContent = fmtDate(latest);
-  }
+        <template x-if="$store.dash.selectedContract && $store.dash.selectedContract.error">
+          <div class="empty" x-text="'查询失败: ' + $store.dash.selectedContract.error"></div>
+        </template>
 
-  // 今日统计
-  if (snap.daily_stats) {
-    const s = snap.daily_stats;
-    document.getElementById('todayCount').textContent = `今日 ${s.total||0} 信号`;
-  }
-}
+        <template x-if="$store.dash.selectedContract && !$store.dash.selectedContract.error">
+          <div class="inspect">
+            <div class="inspect-head">
+              <span class="name"
+                    x-text="($store.dash.selectedContract.sym_name || '')
+                         + ' ' + ($store.dash.selectedContract.code || '')"></span>
+              <span class="price"
+                    x-text="fmt.num($store.dash.selectedContract.last_price, 2)"></span>
+            </div>
+            <template x-if="$store.dash.selectedContract.panel">
+              <div class="kv-grid">
+                <div class="kv"><span class="k">EMA10</span>
+                  <span class="v" x-text="fmt.num($store.dash.selectedContract.panel.ema10)"></span></div>
+                <div class="kv"><span class="k">EMA20</span>
+                  <span class="v" x-text="fmt.num($store.dash.selectedContract.panel.ema20)"></span></div>
+                <div class="kv"><span class="k">EMA120</span>
+                  <span class="v" x-text="fmt.num($store.dash.selectedContract.panel.ema120)"></span></div>
+                <div class="kv"><span class="k">ATR</span>
+                  <span class="v" x-text="fmt.num($store.dash.selectedContract.panel.atr)"></span></div>
+                <div class="kv"><span class="k">ER20</span>
+                  <span class="v"
+                        :class="($store.dash.selectedContract.panel.er20||0) >= 0.5 ? 'pos' : ''"
+                        x-text="fmt.num($store.dash.selectedContract.panel.er20)"></span></div>
+                <div class="kv"><span class="k">偏离ATR</span>
+                  <span class="v"
+                        x-text="fmt.num($store.dash.selectedContract.panel.deviation_atr)"></span></div>
+                <div class="kv"><span class="k">趋势</span>
+                  <span class="v"
+                        :class="$store.dash.selectedContract.panel.trend_dir === 1 ? 'pos' :
+                               ($store.dash.selectedContract.panel.trend_dir === -1 ? 'neg' : '')"
+                        x-text="$store.dash.selectedContract.panel.trend_dir === 1 ? '多' :
+                               ($store.dash.selectedContract.panel.trend_dir === -1 ? '空' : '平')"></span></div>
+                <div class="kv"><span class="k">回调</span>
+                  <span class="v"
+                        x-text="($store.dash.selectedContract.current_state?.pullback_stage || '--')
+                              + ' × '
+                              + ($store.dash.selectedContract.current_state?.pullback_bar_count ?? 0)"></span></div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
 
-// ============ 初始化加载 ============
-async function init() {
-  try {
-    const [snapRes, sigRes] = await Promise.all([
-      fetch('/api/snapshot'), fetch('/api/signals?limit=50')
-    ]);
-    const snap = await snapRes.json();
-    const signals = await sigRes.json();
+      <!-- 候选池 -->
+      <div class="section">
+        <div class="section-title">
+          <span>候选信号池</span>
+          <span class="count" x-text="$store.dash.candidates.length + ' 个'"></span>
+        </div>
 
-    updateStatus(snap);
-    renderPositions(snap.active_positions || {});
-    renderCards(signals);
-    renderMarket(snap.detector_trends);
-  } catch(e) {
-    console.error('初始化失败:', e);
-  }
-}
+        <template x-if="$store.dash.candidates.length === 0">
+          <div class="empty">当前无候选信号</div>
+        </template>
 
-// ============ SSE 实时更新 ============
-function connectSSE() {
-  const es = new EventSource('/api/events');
+        <div class="candidate-list">
+          <template x-for="c in $store.dash.candidates" :key="c.sym_key + '_' + c.kind">
+            <div class="cand"
+                 :class="fmt.distClass(c.distance_ticks)"
+                 @click="dashApi.inspect(c.sym_key)">
+              <div class="cand-head">
+                <span class="cand-name">
+                  <span class="cand-tag"
+                        :class="c.kind && c.kind.startsWith('type1') ? 'kind-T1' :
+                               (c.kind && c.kind.startsWith('BC') ? 'kind-BC' : 'kind-A')"
+                        x-text="c.kind"></span>
+                  <span x-text="c.sym_name || c.sym_key"></span>
+                  <span :class="c.direction_bias === 'long' ? 'bias-long' :
+                               (c.direction_bias === 'short' ? 'bias-short' : 'muted')"
+                        x-text="c.direction_bias === 'long' ? '↑多' :
+                               (c.direction_bias === 'short' ? '↓空' : '')"></span>
+                </span>
+                <span class="cand-dist">
+                  距触发 <b x-text="c.distance_ticks ?? '--'"></b> tick
+                </span>
+              </div>
+              <div class="cand-body">
+                <span>现价 <span class="strong" x-text="fmt.num(c.current_price)"></span></span>
+                <span>触发 <span class="strong" x-text="fmt.num(c.trigger_price)"></span></span>
+                <span>ER20 <span class="strong" x-text="fmt.num(c.er20)"></span></span>
+                <span>偏离 <span class="strong" x-text="fmt.num(c.deviation_atr)"></span>ATR</span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
 
-  es.addEventListener('connected', () => {
-    console.log('SSE 已连接');
-  });
+      <!-- 持仓 -->
+      <div class="section">
+        <div class="section-title">
+          <span>活跃持仓</span>
+          <span class="count" x-text="$store.dash.openPositionCount + ' 笔'"></span>
+        </div>
 
-  es.addEventListener('new_signal', (e) => {
-    const data = JSON.parse(e.data);
-    // 重新加载信号列表和持仓
-    init();
-  });
+        <template x-if="$store.dash.openPositionCount === 0">
+          <div class="empty">暂无活跃持仓</div>
+        </template>
 
-  es.addEventListener('stop_update', (e) => {
-    const data = JSON.parse(e.data);
-    init();
-  });
+        <template x-for="p in $store.dash.openPositions" :key="p.signal_id || p.sym_key">
+          <div class="pos-row">
+            <div class="pos-head">
+              <span class="pos-name">
+                <span x-text="p.sym_name || p.sym_key"></span>
+                <span :class="'dir-' + p.direction"
+                      x-text="p.direction === 'long' ? '多' : '空'"></span>
+              </span>
+              <span class="pos-r"
+                    :class="(($store.dash.portfolioLive[p.signal_id]?.current_r ?? 0) >= 0)
+                           ? 'pos' : 'neg'"
+                    x-text="fmt.r($store.dash.portfolioLive[p.signal_id]?.current_r)"></span>
+            </div>
+            <div class="pos-body">
+              <span>入场 <span class="strong" x-text="fmt.num(p.entry_price)"></span></span>
+              <span>止损 <span class="strong"
+                    x-text="fmt.num($store.dash.portfolioLive[p.signal_id]?.current_stop
+                                  ?? p.current_stop ?? p.initial_stop)"></span></span>
+              <span>策略 <span class="strong" x-text="p.exit_strategy || '--'"></span></span>
+              <span>持根 <span class="strong"
+                    x-text="$store.dash.portfolioLive[p.signal_id]?.bars_held ?? p.bars_held ?? 0"></span></span>
+              <span>MFE <span class="strong"
+                    x-text="fmt.r($store.dash.portfolioLive[p.signal_id]?.mfe_r)"></span></span>
+              <span>MAE <span class="strong"
+                    x-text="fmt.r($store.dash.portfolioLive[p.signal_id]?.mae_r)"></span></span>
+            </div>
+          </div>
+        </template>
+      </div>
 
-  es.addEventListener('position_closed', (e) => {
-    const data = JSON.parse(e.data);
-    init();
-  });
+    </main>
 
-  es.addEventListener('status_change', (e) => {
-    const data = JSON.parse(e.data);
-    const dot = document.getElementById('statusDot');
-    const text = document.getElementById('statusText');
-    dot.className = data.status === 'running' ? 'status-dot on' : 'status-dot off';
-    text.textContent = data.status === 'running' ? '运行中' : data.status;
-  });
+    <!-- =========== 右栏：信号流水 + 拒绝流水 =========== -->
+    <aside class="col col-right" x-data="{ tab: 'rejects' }">
 
-  es.addEventListener('heartbeat', () => {});
+      <div class="section">
+        <div class="section-title">
+          <span>事件流水</span>
+        </div>
+        <div class="tabs">
+          <span class="tab" :class="tab==='rejects' ? 'active' : ''"
+                @click="tab='rejects'">拒绝 <span x-text="$store.dash.rejectStream.length"></span></span>
+          <span class="tab" :class="tab==='sector' ? 'active' : ''"
+                @click="tab='sector'">板块</span>
+        </div>
 
-  es.onerror = () => {
-    console.log('SSE 断开，自动重连...');
-  };
-}
+        <template x-if="tab==='rejects'">
+          <div class="feed">
+            <template x-if="$store.dash.rejectStream.length === 0">
+              <div class="empty">暂无拒绝</div>
+            </template>
+            <template x-for="(r, idx) in $store.dash.rejectStream.slice(0, 50)"
+                      :key="(r.time||idx) + '_' + idx">
+              <div class="feed-item"
+                   :class="r.stage === 'near_miss' ? 'near-miss' :
+                          (r.stage === 'global_filter' ? 'reject-global' : '')">
+                <span class="time" x-text="fmt.time(r.time)"></span>
+                <span class="sym" x-text="r.sym_key || '--'"></span>
+                <span class="tag" x-text="r.stage || ''"></span>
+                <span class="reason" x-text="r.reason"></span>
+              </div>
+            </template>
+          </div>
+        </template>
 
-// 启动
-init();
-connectSSE();
-// 每60秒兜底刷新
-setInterval(init, 60000);
-</script>
+        <template x-if="tab==='sector'">
+          <div class="feed">
+            <template x-if="Object.keys($store.dash.sectorExposure).length === 0">
+              <div class="empty">暂无板块数据</div>
+            </template>
+            <template x-for="(slot, sec) in $store.dash.sectorExposure" :key="sec">
+              <div class="feed-item">
+                <span class="sym" x-text="sec"></span>
+                <span class="tag" x-show="slot.long_count > 0"
+                      x-text="'多 ' + slot.long_count"></span>
+                <span class="tag" x-show="slot.short_count > 0"
+                      x-text="'空 ' + slot.short_count"></span>
+                <span class="muted" style="margin-left:6px" x-text="
+                  (slot.long_symbols || []).join(',') + ' / ' +
+                  (slot.short_symbols || []).join(',')"></span>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
 
+    </aside>
+
+  </div>
+</div>
+
+<script src="/static/alpine.min.js" defer></script>
+<script src="/static/dashboard.js"></script>
 </body>
 </html>

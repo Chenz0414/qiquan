@@ -1,0 +1,140 @@
+/* ============================================================
+   期货信号监控 · Phase C 仪表盘
+   ============================================================ */
+:root {
+  --bg:#0d1117; --bg2:#161b22; --bg3:#21262d; --bg4:#2a313c;
+  --text:#c9d1d9; --text2:#8b949e; --text3:#6e7681;
+  --border:#30363d; --border2:#3a434f;
+  --profit:#3fb950; --loss:#f85149; --warn:#d29922;
+  --blue:#58a6ff; --purple:#bc8cff; --cyan:#39c5cf;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;line-height:1.4}
+
+/* ========== 布局骨架 ========== */
+.app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+
+.header{background:var(--bg2);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.header h1{font-size:15px;font-weight:600;color:var(--text)}
+.header .spacer{flex:1}
+.header .stat{font-size:12px;color:var(--text2)}
+.header .stat b{color:var(--text)}
+
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin-right:4px}
+.status-dot.on{background:var(--profit);box-shadow:0 0 5px var(--profit)}
+.status-dot.off{background:var(--loss);box-shadow:0 0 5px var(--loss)}
+.status-dot.warn{background:var(--warn);box-shadow:0 0 5px var(--warn)}
+
+.main{display:grid;grid-template-columns:280px 1fr 380px;height:100%;overflow:hidden}
+
+.col{overflow-y:auto;overflow-x:hidden;border-right:1px solid var(--border)}
+.col:last-child{border-right:none;border-left:1px solid var(--border)}
+.col-mid{border-right:none}
+
+.section{padding:10px 12px;border-bottom:1px solid var(--border)}
+.section-title{font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+.section-title .count{color:var(--text3);font-weight:normal}
+
+/* ========== 候选池 ========== */
+.candidate-list{display:flex;flex-direction:column;gap:6px}
+.cand{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;cursor:pointer;transition:border-color .1s}
+.cand:hover{border-color:var(--border2);background:var(--bg3)}
+.cand.near{border-left:3px solid var(--warn)}
+.cand.hit{border-left:3px solid var(--profit)}
+.cand.past{border-left:3px solid var(--loss)}
+.cand-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.cand-name{font-weight:600;font-size:13px}
+.cand-name .bias-long{color:var(--loss)}
+.cand-name .bias-short{color:var(--profit)}
+.cand-dist{font-size:11px;color:var(--text2)}
+.cand-dist b{color:var(--text)}
+.cand-body{font-size:11px;color:var(--text2);display:grid;grid-template-columns:1fr 1fr;gap:2px 8px}
+.cand-tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;background:var(--bg3);color:var(--text2);margin-right:4px}
+.cand-tag.kind-A{background:#1f3a5c;color:#79b8ff}
+.cand-tag.kind-BC{background:#2d2a4a;color:#bc8cff}
+.cand-tag.kind-T1{background:#3a2d4a;color:#d2a8ff}
+
+/* ========== 合约查询 ========== */
+.search-bar{display:flex;gap:6px;margin-bottom:10px}
+.search-bar input{flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px;font-family:inherit}
+.search-bar input:focus{outline:none;border-color:var(--blue)}
+.search-bar button{background:var(--blue);color:#fff;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600}
+.search-bar button:hover{background:#4493f8}
+
+.inspect{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:10px}
+.inspect-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.inspect-head .name{font-size:15px;font-weight:600}
+.inspect-head .price{font-size:18px;font-weight:700;color:var(--cyan)}
+
+.kv-grid{display:grid;grid-template-columns:repeat(4, 1fr);gap:6px 12px;font-size:12px}
+.kv{display:flex;flex-direction:column}
+.kv .k{color:var(--text3);font-size:10px;margin-bottom:1px}
+.kv .v{color:var(--text);font-weight:600}
+.kv .v.pos{color:var(--profit)}
+.kv .v.neg{color:var(--loss)}
+
+/* ========== 持仓 ========== */
+.pos-row{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px}
+.pos-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.pos-name{font-weight:600}
+.pos-name .dir-long{color:var(--loss);margin-left:4px}
+.pos-name .dir-short{color:var(--profit);margin-left:4px}
+.pos-r{font-size:13px;font-weight:700}
+.pos-r.pos{color:var(--profit)}
+.pos-r.neg{color:var(--loss)}
+.pos-body{font-size:11px;color:var(--text2);display:grid;grid-template-columns:repeat(4,1fr);gap:2px 8px}
+
+/* 止损进度条 */
+.pos-bar{margin-top:6px;height:6px;background:var(--bg3);border-radius:3px;position:relative;overflow:hidden}
+.pos-bar .fill{position:absolute;top:0;bottom:0;background:linear-gradient(90deg,var(--loss),var(--warn),var(--profit));opacity:.65}
+.pos-bar .marker{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text)}
+
+/* ========== 规则树 ========== */
+.rule-tree{display:flex;flex-direction:column;gap:4px}
+.rule-item{background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 10px;cursor:pointer;transition:background .1s}
+.rule-item:hover{background:var(--bg3)}
+.rule-item.active{border-color:var(--blue)}
+.rule-top{display:flex;justify-content:space-between;align-items:center}
+.rule-label{font-weight:600;font-size:12px}
+.rule-badge{font-size:10px;padding:1px 5px;border-radius:8px;background:var(--bg3);color:var(--text2);margin-left:4px}
+.rule-badge.warn{background:#3d2d13;color:var(--warn)}
+.rule-badge.alert{background:#3d1513;color:var(--loss)}
+.rule-count{font-size:11px;color:var(--text2);margin-top:2px;display:flex;gap:10px}
+.rule-count .win{color:var(--profit)}
+.rule-count .lose{color:var(--loss)}
+
+/* ========== 信号流水 / 拒绝流水 ========== */
+.feed{display:flex;flex-direction:column;gap:4px;max-height:none}
+.feed-item{background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:11px}
+.feed-item .time{color:var(--text3);font-size:10px;margin-right:6px}
+.feed-item .sym{font-weight:600;color:var(--text)}
+.feed-item .reason{color:var(--text2)}
+.feed-item.near-miss{border-left:3px solid var(--warn)}
+.feed-item.reject-global{border-left:3px solid var(--text3)}
+
+.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tab{background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer}
+.tab.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+/* ========== 通用 ========== */
+.empty{padding:20px 10px;text-align:center;color:var(--text3);font-size:12px}
+.muted{color:var(--text3)}
+.strong{color:var(--text)}
+.tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;background:var(--bg3);color:var(--text2)}
+.tag.ok{color:var(--profit);border:1px solid var(--profit)}
+.tag.warn{color:var(--warn);border:1px solid var(--warn)}
+.tag.bad{color:var(--loss);border:1px solid var(--loss)}
+
+/* 滚动条 */
+.col::-webkit-scrollbar{width:6px}
+.col::-webkit-scrollbar-track{background:var(--bg)}
+.col::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px}
+.col::-webkit-scrollbar-thumb:hover{background:var(--border2)}
+
+/* ========== 小屏降级 ========== */
+@media(max-width:1100px){
+  .main{grid-template-columns:1fr}
+  .col{border-right:none;border-bottom:1px solid var(--border)}
+  .col:last-child{border-left:none}
+}

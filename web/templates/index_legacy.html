@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>期货信号监控</title>
+<style>
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+  --text: #c9d1d9; --text2: #8b949e; --border: #30363d;
+  --profit: #3fb950; --loss: #f85149; --warn: #d29922;
+  --blue: #58a6ff; --purple: #bc8cff;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:-apple-system,sans-serif; font-size:14px; }
+
+/* 顶部状态栏 */
+.header { background:var(--bg2); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; position:sticky; top:0; z-index:10; }
+.header h1 { font-size:18px; font-weight:600; }
+.status-dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+.status-dot.on { background:var(--profit); box-shadow:0 0 6px var(--profit); }
+.status-dot.off { background:var(--loss); box-shadow:0 0 6px var(--loss); }
+.badge { background:var(--bg3); border:1px solid var(--border); border-radius:12px; padding:2px 10px; font-size:12px; }
+.badge.profit { border-color:var(--profit); color:var(--profit); }
+.badge.loss { border-color:var(--loss); color:var(--loss); }
+
+.container { max-width:1200px; margin:0 auto; padding:16px; }
+.section-title { font-size:16px; font-weight:600; margin:20px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+
+/* 持仓表格 */
+.pos-table { width:100%; border-collapse:collapse; }
+.pos-table th { text-align:left; padding:8px 12px; background:var(--bg3); color:var(--text2); font-size:12px; font-weight:500; }
+.pos-table td { padding:8px 12px; border-bottom:1px solid var(--border); }
+.pos-table tr.profit-row { background:rgba(63,185,80,0.08); }
+.pos-table tr.loss-row { background:rgba(248,81,73,0.08); }
+.dir-long { color:var(--loss); font-weight:600; }
+.dir-short { color:var(--profit); font-weight:600; }
+.empty-msg { text-align:center; padding:24px; color:var(--text2); }
+
+/* 信号卡片 */
+.cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:12px; }
+.card { background:var(--bg2); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.card-header { padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
+.card-header .title { font-weight:600; font-size:15px; }
+.card-header .tags { display:flex; gap:6px; }
+.card-header .tag { font-size:11px; padding:1px 8px; border-radius:10px; background:var(--bg3); border:1px solid var(--border); }
+.card-header .tag.s1 { border-color:var(--blue); color:var(--blue); }
+.card-header .tag.s2 { border-color:var(--purple); color:var(--purple); }
+.card-header .tag.s3 { border-color:var(--warn); color:var(--warn); }
+.tag[title] { cursor:help; position:relative; }
+.tag[title]:hover::after { content:attr(title); position:absolute; top:100%; left:50%; transform:translateX(-50%); margin-top:6px; background:#1c2128; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:12px; white-space:pre-line; width:220px; z-index:100; line-height:1.5; box-shadow:0 4px 12px rgba(0,0,0,0.4); pointer-events:none; }
+.tag[title]:hover { z-index:101; }
+.card-status { padding:4px 16px 8px; font-size:13px; }
+.card-status .open { color:var(--warn); }
+.card-status .win { color:var(--profit); }
+.card-status .lose { color:var(--loss); }
+.card-info { padding:8px 16px; font-size:13px; color:var(--text2); display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+.card-info span { white-space:nowrap; }
+
+/* 时间线 */
+.timeline { padding:8px 16px 12px; }
+.tl-item { display:flex; gap:8px; padding:3px 0; font-size:12px; color:var(--text2); }
+.tl-dot { width:8px; height:8px; border-radius:50%; border:2px solid var(--border); margin-top:3px; flex-shrink:0; }
+.tl-dot.entry { background:var(--blue); border-color:var(--blue); }
+.tl-dot.stop { background:var(--warn); border-color:var(--warn); }
+.tl-dot.exit { background:var(--profit); border-color:var(--profit); }
+.tl-dot.exit-loss { background:var(--loss); border-color:var(--loss); }
+
+/* 市场概览 */
+.market-grid { display:flex; flex-wrap:wrap; gap:6px; }
+.market-chip { font-size:11px; padding:3px 8px; border-radius:4px; background:var(--bg3); border:1px solid var(--border); }
+.market-chip.long { border-color:var(--loss); color:var(--loss); }
+.market-chip.short { border-color:var(--profit); color:var(--profit); }
+.market-chip.flat { color:var(--text2); }
+
+@media(max-width:768px) {
+  .cards { grid-template-columns:1fr; }
+  .header { padding:8px 12px; }
+  .container { padding:8px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>期货信号监控</h1>
+  <span><span class="status-dot off" id="statusDot"></span> <span id="statusText">连接中...</span></span>
+  <span class="badge" id="lastUpdate">--</span>
+  <span class="badge" id="posCount">持仓 0</span>
+  <span class="badge" id="todayCount">今日 0 信号</span>
+</div>
+
+<div class="container">
+
+  <div class="section-title">活跃持仓</div>
+  <table class="pos-table">
+    <thead>
+      <tr><th>品种</th><th>方向</th><th>入场价</th><th>当前止损</th><th>策略</th><th>持仓根数</th></tr>
+    </thead>
+    <tbody id="posBody">
+      <tr><td colspan="6" class="empty-msg">暂无活跃持仓</td></tr>
+    </tbody>
+  </table>
+
+  <div class="section-title">信号记录</div>
+  <div class="cards" id="cardsContainer"></div>
+
+  <div class="section-title" style="cursor:pointer" onclick="document.getElementById('marketSection').style.display=document.getElementById('marketSection').style.display==='none'?'block':'none'">
+    市场概览 ▾
+  </div>
+  <div id="marketSection">
+    <div class="market-grid" id="marketGrid"></div>
+  </div>
+
+</div>
+
+<script>
+// ============ 工具函数 ============
+const DIR_LABEL = {long:'多', short:'空'};
+const DIR_VERB = {long:'做多', short:'做空'};
+const DIR_CLASS = {long:'dir-long', short:'dir-short'};
+const SCENE_TIP = {
+  1: '偏离≤1ATR\nER≥0.5\n趋势回调入场\n出场: S2',
+  2: '1ATR<偏离≤3ATR\nER≥0.5\n偏离较大\n出场: S2',
+  3: '偏离>3ATR 或 ER<0.5\n极端偏离/弱趋势\n出场: S5.1(S3.1兜底+S2接管)',
+};
+
+function fmtTime(iso) {
+  if (!iso) return '--';
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function fmtDate(iso) {
+  if (!iso) return '--';
+  return iso.slice(0, 16).replace('T', ' ');
+}
+
+// ============ 持仓表 ============
+function renderPositions(positions) {
+  const tbody = document.getElementById('posBody');
+  const keys = Object.keys(positions);
+  document.getElementById('posCount').textContent = `持仓 ${keys.length}`;
+  if (keys.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">暂无活跃持仓</td></tr>';
+    return;
+  }
+  tbody.innerHTML = keys.map(sym => {
+    const p = positions[sym];
+    const dirCls = DIR_CLASS[p.direction] || '';
+    const dirText = DIR_LABEL[p.direction] || p.direction;
+    return `<tr>
+      <td><b>${p.sym_name||sym}</b></td>
+      <td class="${dirCls}">${dirText}</td>
+      <td>${p.entry_price}</td>
+      <td>${p.current_stop || '--'}</td>
+      <td>${p.exit_strategy} ${p.mode ? '['+p.mode+']' : ''}</td>
+      <td>${p.bars_held || '--'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ============ 信号卡片 ============
+function renderCard(sig) {
+  const dir = DIR_VERB[sig.direction] || sig.direction;
+  const pb = sig.pullback_bars > 0 ? `${sig.signal_type}${sig.pullback_bars}根` : sig.signal_type;
+  const sceneCls = sig.scenario === 1 ? 's1' : sig.scenario === 2 ? 's2' : 's3';
+
+  let statusHtml;
+  if (sig.status === 'open') {
+    statusHtml = `<span class="open">● 持仓中</span>`;
+  } else {
+    const sign = sig.pnl_pct >= 0 ? '+' : '';
+    const cls = sig.pnl_pct >= 0 ? 'win' : 'lose';
+    statusHtml = `<span class="${cls}">● 已平仓 ${sign}${sig.pnl_pct.toFixed(1)}%</span>`;
+  }
+
+  // 时间线
+  let tlHtml = `<div class="tl-item"><div class="tl-dot entry"></div><span>${fmtTime(sig.entry_time)} 开仓 入${sig.entry_price} 止${sig.initial_stop}</span></div>`;
+  if (sig.stop_history) {
+    sig.stop_history.forEach(h => {
+      tlHtml += `<div class="tl-item"><div class="tl-dot stop"></div><span>${fmtTime(h.time)} 止损 ${h.old}→${h.new}</span></div>`;
+    });
+  }
+  if (sig.status === 'closed') {
+    const dotCls = sig.pnl_pct >= 0 ? 'exit' : 'exit-loss';
+    const sign = sig.pnl_pct >= 0 ? '+' : '';
+    tlHtml += `<div class="tl-item"><div class="tl-dot ${dotCls}"></div><span>${fmtTime(sig.exit_time)} 平仓 ${sig.exit_price} ${sign}${sig.pnl_pct.toFixed(1)}%</span></div>`;
+  }
+
+  return `<div class="card" data-id="${sig.id}">
+    <div class="card-header">
+      <span class="title">${sig.sym_name} ${dir} ${pb}</span>
+      <div class="tags">
+        <span class="tag ${sceneCls}" title="${SCENE_TIP[sig.scenario]||''}">场景${sig.scenario}</span>
+        ${sig.position_multiplier > 1 ? `<span class="tag">${sig.position_multiplier}x</span>` : ''}
+      </div>
+    </div>
+    <div class="card-status">${statusHtml}</div>
+    <div class="card-info">
+      <span>入场: ${sig.entry_price}</span><span>止损: ${sig.initial_stop}</span>
+      <span>ER: ${sig.er20 != null ? sig.er20.toFixed(2) : '--'}</span><span>偏离: ${sig.deviation_atr != null ? sig.deviation_atr.toFixed(1) : '--'}ATR</span>
+    </div>
+    <div class="timeline">${tlHtml}</div>
+  </div>`;
+}
+
+function renderCards(signals) {
+  document.getElementById('cardsContainer').innerHTML = signals.map(renderCard).join('');
+}
+
+// ============ 市场概览 ============
+function renderMarket(trends) {
+  const grid = document.getElementById('marketGrid');
+  if (!trends || Object.keys(trends).length === 0) {
+    grid.innerHTML = '<span class="market-chip flat">等待数据...</span>';
+    return;
+  }
+  grid.innerHTML = Object.entries(trends).map(([sym, dir]) => {
+    const cls = dir === 1 ? 'long' : dir === -1 ? 'short' : 'flat';
+    const arrow = dir === 1 ? '↑' : dir === -1 ? '↓' : '-';
+    const name = sym.split('.')[1] || sym;
+    return `<span class="market-chip ${cls}">${name}${arrow}</span>`;
+  }).join('');
+}
+
+// ============ 状态栏 ============
+function updateStatus(snap) {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  if (snap.engine_status === 'running') {
+    dot.className = 'status-dot on';
+    text.textContent = '运行中';
+  } else if (snap.engine_status === 'reconnecting') {
+    dot.className = 'status-dot off';
+    text.textContent = '重连中...';
+  } else {
+    dot.className = 'status-dot off';
+    text.textContent = snap.engine_status || '未知';
+  }
+
+  // 最后更新时间
+  const times = Object.values(snap.last_bar_time || {});
+  if (times.length > 0) {
+    const latest = times.sort().pop();
+    document.getElementById('lastUpdate').textContent = fmtDate(latest);
+  }
+
+  // 今日统计
+  if (snap.daily_stats) {
+    const s = snap.daily_stats;
+    document.getElementById('todayCount').textContent = `今日 ${s.total||0} 信号`;
+  }
+}
+
+// ============ 初始化加载 ============
+async function init() {
+  try {
+    const [snapRes, sigRes] = await Promise.all([
+      fetch('/api/snapshot'), fetch('/api/signals?limit=50')
+    ]);
+    const snap = await snapRes.json();
+    const signals = await sigRes.json();
+
+    updateStatus(snap);
+    renderPositions(snap.active_positions || {});
+    renderCards(signals);
+    renderMarket(snap.detector_trends);
+  } catch(e) {
+    console.error('初始化失败:', e);
+  }
+}
+
+// ============ SSE 实时更新 ============
+function connectSSE() {
+  const es = new EventSource('/api/events');
+
+  es.addEventListener('connected', () => {
+    console.log('SSE 已连接');
+  });
+
+  es.addEventListener('new_signal', (e) => {
+    const data = JSON.parse(e.data);
+    // 重新加载信号列表和持仓
+    init();
+  });
+
+  es.addEventListener('stop_update', (e) => {
+    const data = JSON.parse(e.data);
+    init();
+  });
+
+  es.addEventListener('position_closed', (e) => {
+    const data = JSON.parse(e.data);
+    init();
+  });
+
+  es.addEventListener('status_change', (e) => {
+    const data = JSON.parse(e.data);
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+    dot.className = data.status === 'running' ? 'status-dot on' : 'status-dot off';
+    text.textContent = data.status === 'running' ? '运行中' : data.status;
+  });
+
+  es.addEventListener('heartbeat', () => {});
+
+  es.onerror = () => {
+    console.log('SSE 断开，自动重连...');
+  };
+}
+
+// 启动
+init();
+connectSSE();
+// 每60秒兜底刷新
+setInterval(init, 60000);
+</script>
+
+</body>
+</html>
