@@ -148,6 +148,13 @@ class SignalDB:
                 generated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # 迁移：为 signals 表补齐 mfe_r / mae_r 列
+        existing_cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(signals)").fetchall()}
+        for col in ("mfe_r", "mae_r"):
+            if col not in existing_cols:
+                self._conn.execute(
+                    f"ALTER TABLE signals ADD COLUMN {col} REAL")
         self._conn.commit()
 
     def record_entry(self, sym_key: str, sym_name: str, direction: str,
@@ -191,14 +198,16 @@ class SignalDB:
 
     def record_exit(self, signal_id: int, exit_price: float,
                     exit_reason: str, pnl_pct: float,
-                    bars_held: int, exit_time: str):
+                    bars_held: int, exit_time: str,
+                    mfe_r: float = None, mae_r: float = None):
         """记录平仓"""
         self._conn.execute("""
             UPDATE signals SET exit_price = ?, exit_reason = ?,
-                pnl_pct = ?, bars_held = ?, exit_time = ?, status = 'closed'
+                pnl_pct = ?, bars_held = ?, exit_time = ?, status = 'closed',
+                mfe_r = ?, mae_r = ?
             WHERE id = ?
         """, (exit_price, exit_reason, pnl_pct, bars_held,
-              exit_time, signal_id))
+              exit_time, mfe_r, mae_r, signal_id))
         self._conn.commit()
         logger.debug(f"信号平仓: id={signal_id} pnl={pnl_pct:+.2f}%")
 

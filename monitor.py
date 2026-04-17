@@ -19,7 +19,41 @@ from signal_core import (
     classify_scenario, SCENARIO_EXIT, SCENARIO_NAMES,
     Type1SignalDetector, Type1Signal, LadderRTracker,
     classify_type1_tier, TYPE1_TIER_NAMES,
+    RejectObserver,
 )
+
+
+class _DBRejectObserver(RejectObserver):
+    """把拒绝原因落到 signal_db.rejected_signals + DashboardState.reject_stream。"""
+
+    def __init__(self, signal_db=None, dashboard_state=None):
+        self.signal_db = signal_db
+        self.dashboard_state = dashboard_state
+
+    def emit(self, sym_key, stage, reason, context=None):
+        ctx = context or {}
+        try:
+            if self.signal_db:
+                self.signal_db.record_reject(
+                    sym_key=sym_key,
+                    bar_time=ctx.get("bar_time") or datetime.now().isoformat(),
+                    stage=stage, reason=reason,
+                    signal_type=ctx.get("signal_type"),
+                    direction=ctx.get("direction"),
+                    er20=ctx.get("er20"),
+                    deviation_atr=ctx.get("deviation_atr"),
+                    context=ctx,
+                )
+        except Exception:
+            logger.exception("record_reject 失败")
+        try:
+            if self.dashboard_state:
+                self.dashboard_state.push_event("reject", {
+                    "sym_key": sym_key, "stage": stage,
+                    "reason": reason, "context": ctx,
+                })
+        except Exception:
+            pass
 from data_loader import add_indicators, sym_name
 from monitor_config import MonitorConfig
 from notifier import PushPlusNotifier
@@ -82,6 +116,12 @@ class MonitorEngine:
         # 定时保存
         self._last_save = 0
         self._save_interval = 300  # 5分钟
+
+        # 拒绝埋点观察者（落到 DB + 推到仪表盘）
+        self.reject_observer = _DBRejectObserver(
+            signal_db=self.signal_db,
+            dashboard_state=self.dashboard_state,
+        )
 
     # ================================================================
     #  启动 & 关闭
@@ -185,6 +225,8 @@ class MonitorEngine:
             # 冷启动：为每个品种创建新检测器
             for sym_key in self.config.symbols:
                 self.detectors[sym_key] = SignalDetector(signal_types='ABC')
+                self.detectors[sym_key].sym_key = sym_key
+                self.detectors[sym_key].reject_observer = self.reject_observer
                 self.t1_detectors[sym_key] = Type1SignalDetector()
             return
 
@@ -197,7 +239,19 @@ class MonitorEngine:
         for sym_key, pos in state.get("active_positions", {}).items():
             if sym_key in self.config.symbols:
                 self.trackers[sym_key] = ExitTracker.from_dict(pos["tracker"])
-                self.tracker_meta[sym_key] = pos["meta"]
+                meta = pos["meta"]
+                # 老状态可能没有 MFE/MAE 累加器，按 entry_price 补齐
+                entry_p = float(meta.get('entry_price', 0) or 0)
+                if 'running_max_high' not in meta and entry_p:
+                    meta['running_max_high'] = entry_p
+                if 'running_min_low' not in meta and entry_p:
+                    meta['running_min_low'] = entry_p
+                # initial_stop 若缺失，从 tracker 推回
+                if 'initial_stop' not in meta:
+                    tk = self.trackers[sym_key]
+                    meta['initial_stop'] = getattr(tk, 's6_stop', None) or \
+                        getattr(tk, 's2_stop', None) or entry_p
+                self.tracker_meta[sym_key] = meta
 
         # 恢复Type1检测器
         for sym_key, det_dict in state.get("t1_detectors", {}).items():
@@ -219,6 +273,11 @@ class MonitorEngine:
                 self.detectors[sym_key] = SignalDetector(signal_types='ABC')
             if sym_key not in self.t1_detectors:
                 self.t1_detectors[sym_key] = Type1SignalDetector()
+
+        # 给所有 ABC 检测器注入拒绝观察者 + sym_key
+        for sym_key, det in self.detectors.items():
+            det.sym_key = sym_key
+            det.reject_observer = self.reject_observer
 
         t1_active = len(self.t1_trackers)
         logger.info(f"状态恢复: {len(self.detectors)}个检测器, "
@@ -438,6 +497,15 @@ class MonitorEngine:
             meta = self.tracker_meta[sym_key]
             exit_strategy = meta['exit_strategy']
 
+            # MFE/MAE 累加（在 tracker 更新前拿到最新 high/low）
+            try:
+                cur_max = meta.get('running_max_high', meta['entry_price'])
+                cur_min = meta.get('running_min_low', meta['entry_price'])
+                meta['running_max_high'] = max(cur_max, float(high))
+                meta['running_min_low'] = min(cur_min, float(low))
+            except Exception:
+                pass
+
             prev_close = prev_row['close'] if prev_row is not None else close
             prev_high = prev_row['high'] if prev_row is not None else high
             prev_low = prev_row['low'] if prev_row is not None else low
@@ -494,11 +562,29 @@ class MonitorEngine:
                         dominant_price=dom_p,
                     )
                     now_str = datetime.now().isoformat()
+                    # 计算 MFE/MAE（R 单位）
+                    _mfe_r = _mae_r = None
+                    try:
+                        entry = float(meta['entry_price'])
+                        init_stop = float(meta.get('initial_stop', 0) or 0)
+                        dist = abs(entry - init_stop)
+                        if dist > 0:
+                            mh = float(meta.get('running_max_high', entry))
+                            ml = float(meta.get('running_min_low', entry))
+                            if tracker.direction == 'long':
+                                _mfe_r = (mh - entry) / dist
+                                _mae_r = (ml - entry) / dist
+                            else:
+                                _mfe_r = (entry - ml) / dist
+                                _mae_r = (entry - mh) / dist
+                    except Exception:
+                        _mfe_r = _mae_r = None
                     if self.signal_db and 'signal_id' in meta:
                         self.signal_db.record_exit(
                             meta['signal_id'], ev.exit_price,
                             ev.exit_reason, ev.pnl_pct,
-                            ev.bars_held, now_str)
+                            ev.bars_held, now_str,
+                            mfe_r=_mfe_r, mae_r=_mae_r)
                     if self.dashboard_state:
                         self.dashboard_state.remove_position(sym_key)
                         if 'signal_id' in meta:
@@ -757,6 +843,13 @@ class MonitorEngine:
             stop_ticks=DEFAULT_STOP_TICKS,
             ema5_strategies=(exit_strategy in ('S6', 'S6.1')),
         )
+        # 初始止损价（先算出来，用于 MFE/MAE 的 R 单位）
+        _tick_mfe = cfg_sym['tick_size'] * DEFAULT_STOP_TICKS
+        if signal.direction == 'long':
+            _init_stop_for_meta = signal.pullback_extreme - _tick_mfe
+        else:
+            _init_stop_for_meta = signal.pullback_extreme + _tick_mfe
+
         self.trackers[sym_key] = tracker
         self.tracker_meta[sym_key] = {
             'scenario': scenario,
@@ -765,6 +858,10 @@ class MonitorEngine:
             'position_multiplier': position_multiplier,
             'exit_strategy': exit_strategy,
             'entry_price': signal.entry_price,
+            'initial_stop': _init_stop_for_meta,
+            # MFE/MAE 累加器：入场以 entry_price 为基线
+            'running_max_high': float(signal.entry_price),
+            'running_min_low': float(signal.entry_price),
         }
 
         # 初始止损价

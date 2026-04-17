@@ -63,6 +63,60 @@ def _signal_r_mult(row):
         return None
 
 
+def _week_scenario_stats(conn, date_str: str):
+    """近 7 日（含当日）按场景滚动胜率 + avg_r。"""
+    start = (datetime.strptime(date_str, "%Y-%m-%d")
+             - timedelta(days=6)).strftime("%Y-%m-%d")
+    rows = conn.execute("""
+        SELECT scenario, status, pnl_pct, entry_price, initial_stop,
+               exit_price, direction, mfe_r
+          FROM signals
+         WHERE date(entry_time) >= ? AND date(entry_time) <= ?
+    """, (start, date_str)).fetchall()
+    bucket = {}
+    for r in rows:
+        sc = r["scenario"]
+        g = bucket.setdefault(sc, {"hit": 0, "closed": 0, "wins": 0,
+                                    "r_sum": 0.0, "r_n": 0})
+        g["hit"] += 1
+        if r["status"] == "closed":
+            g["closed"] += 1
+            if (r["pnl_pct"] or 0) > 0:
+                g["wins"] += 1
+            # 算 R 倍数
+            try:
+                risk = abs((r["entry_price"] or 0) - (r["initial_stop"] or 0))
+                if risk > 0:
+                    move = (r["exit_price"] or 0) - (r["entry_price"] or 0)
+                    if r["direction"] == "short":
+                        move = -move
+                    g["r_sum"] += move / risk
+                    g["r_n"] += 1
+            except Exception:
+                pass
+    return bucket
+
+
+def _fmt_mfe_mae(row):
+    m, a = row["mfe_r"], row["mae_r"]
+    if m is None and a is None:
+        return ""
+    parts = []
+    if m is not None:
+        parts.append(f"MFE {m:+.2f}R")
+    if a is not None:
+        parts.append(f"MAE {a:+.2f}R")
+    return "  " + " / ".join(parts)
+
+
+def _days_held(entry_time: str, date_str: str) -> int:
+    try:
+        ed = datetime.fromisoformat(entry_time).date()
+        return (datetime.strptime(date_str, "%Y-%m-%d").date() - ed).days
+    except Exception:
+        return 0
+
+
 def build_report(db: SignalDB, date_str: str) -> tuple[str, dict]:
     conn = db._conn
     signals = _today_signals(conn, date_str)
@@ -75,6 +129,7 @@ def build_report(db: SignalDB, date_str: str) -> tuple[str, dict]:
     open_all = _open_positions(conn)
     rejects = _today_rejects(conn, date_str)
     drifts = _drift_alerts(conn, date_str)
+    week_stats = _week_scenario_stats(conn, date_str)
 
     # 按场景分组
     by_scenario = {}
@@ -100,15 +155,58 @@ def build_report(db: SignalDB, date_str: str) -> tuple[str, dict]:
     lines.append(f"- 今日合计: {len(signals)} 笔入场, 已平 {len(closed_today)} 笔, "
                  f"胜率 {(len(wins)/len(closed_today)*100) if closed_today else 0:.0f}%, "
                  f"净盈亏 {total_pnl:+.2f}%")
+    # 今日已平仓明细（带 MFE/MAE）
+    if closed_today:
+        lines.append("")
+        lines.append("### 今日已平仓明细")
+        for s in closed_today:
+            lines.append(
+                f"- {s['sym_name']} {s['direction']} "
+                f"@{s['entry_price']}→{s['exit_price']} "
+                f"{(s['pnl_pct'] or 0):+.2f}% [{s['exit_reason']}]"
+                f"{_fmt_mfe_mae(s)}"
+            )
     lines.append("")
 
+    # 近7日场景表现（滚动胜率）
+    lines.append("## 近7日场景表现")
+    if not week_stats:
+        lines.append("- 无数据")
+    else:
+        for sc in sorted(week_stats):
+            g = week_stats[sc]
+            wr = (g["wins"] / g["closed"] * 100) if g["closed"] else 0
+            avg_r = (g["r_sum"] / g["r_n"]) if g["r_n"] else 0
+            lines.append(
+                f"- 场景{sc}: {g['hit']} 笔 (已平 {g['closed']}), "
+                f"胜率 {wr:.0f}%, avg {avg_r:+.2f}R")
+    lines.append("")
+
+    # 持仓快照：区分新开 vs 持仓 N 天
     lines.append("## 持仓快照")
     if not open_all:
         lines.append("- 无持仓")
+    new_opens = []
+    carry_opens = []
     for p in open_all[:20]:
-        lines.append(
-            f"- {p['sym_name']} {p['direction']} @{p['entry_price']} "
-            f"止损 {p['initial_stop']} 场景{p['scenario']}")
+        d = _days_held(p["entry_time"], date_str)
+        if d <= 0:
+            new_opens.append(p)
+        else:
+            carry_opens.append((d, p))
+    if new_opens:
+        lines.append("### 今日新开")
+        for p in new_opens:
+            lines.append(
+                f"- {p['sym_name']} {p['direction']} @{p['entry_price']} "
+                f"止损 {p['initial_stop']} 场景{p['scenario']}")
+    if carry_opens:
+        lines.append("### 前期持仓")
+        for d, p in sorted(carry_opens, key=lambda x: -x[0]):
+            lines.append(
+                f"- {p['sym_name']} {p['direction']} @{p['entry_price']} "
+                f"止损 {p['initial_stop']} 场景{p['scenario']} "
+                f"(持 {d} 天)")
     lines.append("")
 
     lines.append("## 规则漂移")
@@ -137,6 +235,7 @@ def build_report(db: SignalDB, date_str: str) -> tuple[str, dict]:
         "open_count": len(open_all),
         "drift_warn_count": len(drifts),
         "reject_count": total_rej,
+        "week_stats": {str(k): v for k, v in week_stats.items()},
     }
     return content, stats
 
