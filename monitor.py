@@ -5,6 +5,7 @@
 TqSdk 实时订阅 → 信号检测 → 出场追踪 → 微信推送
 """
 
+import os
 import time
 import logging
 import numpy as np
@@ -12,6 +13,12 @@ import pandas as pd
 from datetime import datetime
 
 from tqsdk import TqApi, TqAuth
+
+# 为 "行情监控" 项目提供实时 parquet（独立 latest/ 子目录，不覆盖 170d 历史）
+_LATEST_RAW_COLS = ("datetime", "open", "high", "low", "close", "volume", "open_oi", "close_oi")
+_LATEST_PERF_THRESHOLD_MS = 1000     # 单次 to_parquet 超过此值打 WARN
+_LATEST_LOG_EVERY = 100              # 每 N 次成功写盘打一次 INFO 汇总（避免日志刷屏）
+_latest_write_counter = {"n": 0, "max_ms": 0.0}
 
 from signal_core import (
     SignalDetector, ExitTracker, Signal,
@@ -473,6 +480,57 @@ class MonitorEngine:
 
         self.last_bar_dt[sym_key] = last_completed_dt
         self.bar_counts[sym_key] = n
+
+        # ======================================================
+        # 为"行情监控"项目回写最新序列到 latest/ 子目录
+        # 原 170d 历史缓存不动；latest 只有当前 serial 长度（约 35 天）
+        # 行情监控的 watchdog/轮询会识别 mtime 变化触发阶段事件检测
+        # ------------------------------------------------------
+        # 只做附带动作，任何异常都吞掉不能影响 qiquan 主循环
+        # ======================================================
+        try:
+            self._write_latest_parquet(sym_key, df)
+        except Exception as e:
+            logger.warning(f"[latest-parquet] {sym_key} 写盘失败: {type(e).__name__}: {e}")
+
+    def _write_latest_parquet(self, sym_key: str, df: pd.DataFrame):
+        """把当前 serial 的原始 OHLCV 写到 CACHE_DIR/latest/{safe}_{period}min.parquet。
+
+        约定：
+          - 只写 RAW_COLS 8 列（去掉 qiquan 内部算的 EMA/ER/ATR 指标，节省 IO）
+          - datetime 保持 naive UTC（qiquan 内部就是 UTC；行情监控 load_latest 会再 +8h 转 CST）
+          - 非原子覆盖写（pandas 默认 to_parquet）——读端要 try/except 容忍半截文件
+        """
+        from data_cache import CACHE_DIR  # qiquan/data_cache.py 定义
+        latest_dir = os.path.join(CACHE_DIR, "latest")
+        os.makedirs(latest_dir, exist_ok=True)
+
+        safe = sym_key.replace(".", "_")
+        # 假设周期 10min（qiquan 主路径就是 10min；如果扩展多周期后改这里）
+        path = os.path.join(latest_dir, f"{safe}_10min.parquet")
+
+        cols = [c for c in _LATEST_RAW_COLS if c in df.columns]
+        raw = df[cols].copy()
+
+        t0 = time.perf_counter()
+        raw.to_parquet(path, index=False)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        _latest_write_counter["n"] += 1
+        if elapsed_ms > _latest_write_counter["max_ms"]:
+            _latest_write_counter["max_ms"] = elapsed_ms
+
+        if elapsed_ms > _LATEST_PERF_THRESHOLD_MS:
+            logger.warning(
+                f"[latest-parquet] {sym_key} to_parquet 耗时 {elapsed_ms:.1f}ms "
+                f"(> {_LATEST_PERF_THRESHOLD_MS}ms 阈值)"
+            )
+
+        if _latest_write_counter["n"] % _LATEST_LOG_EVERY == 0:
+            logger.info(
+                f"[latest-parquet] 累计写盘 {_latest_write_counter['n']} 次, "
+                f"max={_latest_write_counter['max_ms']:.1f}ms"
+            )
 
     def _process_bar(self, sym_key: str, df: pd.DataFrame, idx: int):
         """处理单根已完成的K线"""
